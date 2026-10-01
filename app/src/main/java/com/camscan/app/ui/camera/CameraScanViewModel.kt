@@ -13,6 +13,7 @@ import com.camscan.app.domain.model.CornerPoints
 import com.camscan.app.domain.processor.DocumentDetector
 import com.camscan.app.domain.processor.DocumentEnhancer
 import com.camscan.app.domain.model.FilterMode
+import com.camscan.app.domain.processor.DocumentProcessor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -64,8 +65,8 @@ class CameraScanViewModel(private val repository: DocumentRepository) : ViewMode
                 val rotatedBitmap = Bitmap.createBitmap(rawBitmap, 0, 0, rawBitmap.width, rawBitmap.height, matrix, true)
 
                 val origPath = storageManager.saveBitmap(rotatedBitmap, isOriginal = true)
-                val enhanced = DocumentEnhancer.enhance(rotatedBitmap, FilterMode.AUTO)
-                val procPath = storageManager.saveBitmap(enhanced, isOriginal = false)
+                val processed = DocumentProcessor.processImage(rotatedBitmap, FilterMode.AUTO)
+                val procPath = storageManager.saveBitmap(processed, isOriginal = false)
 
                 if (isBatchMode.value) {
                     capturedPages.value = capturedPages.value + Pair(origPath, procPath)
@@ -141,8 +142,8 @@ class CameraScanViewModel(private val repository: DocumentRepository) : ViewMode
                 if (origPath != null) {
                     val bitmap = storageManager.loadBitmap(origPath)
                     if (bitmap != null) {
-                        val enhanced = DocumentEnhancer.enhance(bitmap, FilterMode.AUTO)
-                        val procPath = storageManager.saveBitmap(enhanced, isOriginal = false)
+                        val processed = DocumentProcessor.processImage(bitmap, FilterMode.AUTO)
+                        val procPath = storageManager.saveBitmap(processed, isOriginal = false)
                         pagePairs.add(Pair(origPath, procPath))
                     }
                 }

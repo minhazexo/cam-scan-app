@@ -5,11 +5,14 @@ import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.camscan.app.CamScanApplication
 import com.camscan.app.data.repository.DocumentRepository
 import com.camscan.app.domain.model.DocumentModel
 import com.camscan.app.domain.processor.DocumentEnhancer
 import com.camscan.app.domain.processor.PdfGenerator
 import com.camscan.app.domain.model.FilterMode
+import com.camscan.app.domain.processor.DocumentProcessor
+import com.camscan.app.domain.processor.PdfImporter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -38,6 +41,13 @@ class HomeViewModel(private val repository: DocumentRepository) : ViewModel() {
             initialValue = emptyList()
         )
 
+    // PDF Import Options & Progress States
+    val isImportingPdf = MutableStateFlow(false)
+    val importProgressText = MutableStateFlow("Preparing PDF import...")
+    val selectedPdfUriForOptions = MutableStateFlow<Uri?>(null)
+    val selectedPdfPageCount = MutableStateFlow(0)
+    val selectedPdfFileName = MutableStateFlow("")
+
     fun onSearchQueryChanged(query: String) {
         searchQuery.value = query
     }
@@ -61,7 +71,7 @@ class HomeViewModel(private val repository: DocumentRepository) : ViewModel() {
     ) {
         viewModelScope.launch(Dispatchers.IO) {
             if (uris.isEmpty()) return@launch
-            val app = context.applicationContext as com.camscan.app.CamScanApplication
+            val app = context.applicationContext as CamScanApplication
             val storageManager = app.storageManager
 
             val pagePairs = mutableListOf<Pair<String, String>>()
@@ -70,8 +80,8 @@ class HomeViewModel(private val repository: DocumentRepository) : ViewModel() {
                 if (origPath != null) {
                     val bitmap = storageManager.loadBitmap(origPath)
                     if (bitmap != null) {
-                        val enhanced = DocumentEnhancer.enhance(bitmap, FilterMode.AUTO)
-                        val procPath = storageManager.saveBitmap(enhanced, isOriginal = false)
+                        val processed = DocumentProcessor.processImage(bitmap, FilterMode.AUTO)
+                        val procPath = storageManager.saveBitmap(processed, isOriginal = false)
                         pagePairs.add(Pair(origPath, procPath))
                     }
                 }
@@ -89,22 +99,53 @@ class HomeViewModel(private val repository: DocumentRepository) : ViewModel() {
         }
     }
 
-    fun importPdfFromGallery(
+    fun preparePdfImport(context: Context, pdfUri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val pageCount = PdfImporter.getPdfPageCount(context, pdfUri)
+            val fileName = PdfImporter.getFileName(context, pdfUri) ?: "Document"
+            withContext(Dispatchers.Main) {
+                selectedPdfPageCount.value = pageCount
+                selectedPdfFileName.value = fileName
+                selectedPdfUriForOptions.value = pdfUri
+            }
+        }
+    }
+
+    fun dismissPdfOptions() {
+        selectedPdfUriForOptions.value = null
+    }
+
+    fun confirmAndImportPdf(
         context: Context,
         pdfUri: Uri,
+        startPage: Int,
+        endPage: Int,
+        filterMode: FilterMode,
         onSuccess: (String) -> Unit
     ) {
+        dismissPdfOptions()
+        isImportingPdf.value = true
+        importProgressText.value = "Scanning PDF pages..."
+
         viewModelScope.launch(Dispatchers.IO) {
-            val app = context.applicationContext as com.camscan.app.CamScanApplication
-            val pagePairs = com.camscan.app.domain.processor.PdfImporter.importPdf(
+            val app = context.applicationContext as CamScanApplication
+            val pagePairs = PdfImporter.importPdf(
                 context = context,
                 pdfUri = pdfUri,
-                storageManager = app.storageManager
-            )
+                storageManager = app.storageManager,
+                startPage = startPage,
+                endPage = endPage,
+                filterMode = filterMode
+            ) { current, total ->
+                importProgressText.value = "Scanning page $current of $total..."
+            }
+
+            isImportingPdf.value = false
 
             if (pagePairs.isNotEmpty()) {
-                val rawName = com.camscan.app.domain.processor.PdfImporter.getFileName(context, pdfUri)
-                    ?: "Imported_PDF_${System.currentTimeMillis() / 1000}"
+                val rawName = selectedPdfFileName.value.ifBlank {
+                    PdfImporter.getFileName(context, pdfUri) ?: "Imported_PDF_${System.currentTimeMillis() / 1000}"
+                }
                 val titleName = rawName.removeSuffix(".pdf").removeSuffix(".PDF")
 
                 val doc = repository.createDocument(
@@ -118,8 +159,16 @@ class HomeViewModel(private val repository: DocumentRepository) : ViewModel() {
         }
     }
 
+    fun importPdfFromGallery(
+        context: Context,
+        pdfUri: Uri,
+        onSuccess: (String) -> Unit
+    ) {
+        preparePdfImport(context, pdfUri)
+    }
+
     fun getInputPdfs(context: Context): List<File> {
-        val app = context.applicationContext as com.camscan.app.CamScanApplication
+        val app = context.applicationContext as CamScanApplication
         return app.storageManager.getPdfsFromInputFolder()
     }
 
@@ -128,7 +177,7 @@ class HomeViewModel(private val repository: DocumentRepository) : ViewModel() {
         pdfFile: File,
         onSuccess: (String) -> Unit
     ) {
-        importPdfFromGallery(context, Uri.fromFile(pdfFile), onSuccess)
+        preparePdfImport(context, Uri.fromFile(pdfFile))
     }
 
     fun exportDocumentPdf(
@@ -137,7 +186,7 @@ class HomeViewModel(private val repository: DocumentRepository) : ViewModel() {
         onComplete: (Uri?) -> Unit
     ) {
         viewModelScope.launch(Dispatchers.IO) {
-            val app = context.applicationContext as com.camscan.app.CamScanApplication
+            val app = context.applicationContext as CamScanApplication
             val pages = repository.getPagesForDocument(document.id)
             val paths = pages.map { it.processedImagePath }
 
@@ -151,7 +200,7 @@ class HomeViewModel(private val repository: DocumentRepository) : ViewModel() {
         }
     }
 
-    class Factory(private val repository: DocumentRepository) : ViewModelProvider.Factory {
+class Factory(private val repository: DocumentRepository) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
             return HomeViewModel(repository) as T

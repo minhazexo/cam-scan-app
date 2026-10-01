@@ -95,6 +95,8 @@ fun DocumentDetailScreen(
     val document by viewModel.document.collectAsState()
     val pages by viewModel.pages.collectAsState()
     val isProcessing by viewModel.isProcessing.collectAsState()
+    val isProcessingPdf by viewModel.isProcessingPdf.collectAsState()
+    val pdfProgressText by viewModel.pdfProgressText.collectAsState()
     val batchOcrResult by viewModel.batchOcrResult.collectAsState()
 
     var showOcrDialog by remember { mutableStateOf(false) }
@@ -173,7 +175,7 @@ fun DocumentDetailScreen(
                     ) {
                         androidx.compose.material3.DropdownMenuItem(
                             text = { Text("Add Photos") },
-                            leadingIcon = { Icon(androidx.compose.material.icons.filled.PhotoLibrary, contentDescription = null) },
+                            leadingIcon = { Icon(Icons.Default.PhotoLibrary, contentDescription = null) },
                             onClick = {
                                 showAddMenu = false
                                 photoPickerLauncher.launch("image/*")
@@ -261,6 +263,33 @@ fun DocumentDetailScreen(
                     Text("Close")
                 }
             }
+        )
+    }
+
+    if (isProcessingPdf) {
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("Importing PDF Pages") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    CircularProgressIndicator(
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text(
+                        text = pdfProgressText,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            },
+            confirmButton = {}
         )
     }
 }

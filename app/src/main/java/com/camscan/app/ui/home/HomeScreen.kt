@@ -6,6 +6,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -42,6 +43,7 @@ import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -73,6 +75,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.camscan.app.domain.model.DocumentModel
+import com.camscan.app.domain.model.FilterMode
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -89,6 +92,17 @@ fun HomeScreen(
     val context = LocalContext.current
     val documents by viewModel.documents.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
+
+    val isImportingPdf by viewModel.isImportingPdf.collectAsState()
+    val importProgressText by viewModel.importProgressText.collectAsState()
+    val selectedPdfUri by viewModel.selectedPdfUriForOptions.collectAsState()
+    val totalPdfPages by viewModel.selectedPdfPageCount.collectAsState()
+    val pdfFileName by viewModel.selectedPdfFileName.collectAsState()
+
+    var startPageInput by remember(totalPdfPages) { mutableStateOf("1") }
+    var endPageInput by remember(totalPdfPages) { mutableStateOf(totalPdfPages.toString()) }
+    var selectedFilterMode by remember { mutableStateOf(FilterMode.AUTO) }
+    var showFilterDropdown by remember { mutableStateOf(false) }
 
     var showRenameDialog by remember { mutableStateOf<DocumentModel?>(null) }
     var renameText by remember { mutableStateOf("") }
@@ -363,6 +377,149 @@ fun HomeScreen(
                     Text("Close")
                 }
             }
+        )
+    }
+
+    if (selectedPdfUri != null) {
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissPdfOptions() },
+            title = { Text("PDF Import Options") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        text = "File: $pdfFileName",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "Total Pages in PDF: $totalPdfPages",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = startPageInput,
+                            onValueChange = { startPageInput = it },
+                            label = { Text("Start Page") },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = endPageInput,
+                            onValueChange = { endPageInput = it },
+                            label = { Text("End Page") },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true
+                        )
+                    }
+
+                    Text(
+                        text = "Enhancement Filter Mode",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+
+                    Box {
+                        OutlinedTextField(
+                            value = selectedFilterMode.displayName,
+                            onValueChange = {},
+                            readOnly = true,
+                            label = { Text("Filter") },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { showFilterDropdown = true },
+                            trailingIcon = {
+                                IconButton(onClick = { showFilterDropdown = true }) {
+                                    Icon(Icons.Default.MoreVert, contentDescription = null)
+                                }
+                            }
+                        )
+                        Box(
+                            modifier = Modifier
+                                .matchParentSize()
+                                .clickable { showFilterDropdown = true }
+                        )
+
+                        DropdownMenu(
+                            expanded = showFilterDropdown,
+                            onDismissRequest = { showFilterDropdown = false }
+                        ) {
+                            FilterMode.entries.forEach { mode ->
+                                DropdownMenuItem(
+                                    text = { Text(mode.displayName) },
+                                    onClick = {
+                                        selectedFilterMode = mode
+                                        showFilterDropdown = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val start = (startPageInput.toIntOrNull() ?: 1) - 1
+                        val end = (endPageInput.toIntOrNull() ?: totalPdfPages) - 1
+                        val uri = selectedPdfUri!!
+                        viewModel.confirmAndImportPdf(
+                            context = context,
+                            pdfUri = uri,
+                            startPage = start,
+                            endPage = end,
+                            filterMode = selectedFilterMode
+                        ) { docId ->
+                            onNavigateToDocumentDetail(docId)
+                        }
+                    }
+                ) {
+                    Text("Import & Scan")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.dismissPdfOptions() }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (isImportingPdf) {
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("Scanning PDF Document") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    CircularProgressIndicator(
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text(
+                        text = importProgressText,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            },
+            confirmButton = {}
         )
     }
 }

@@ -15,10 +15,36 @@ import kotlinx.coroutines.withContext
 
 object PdfImporter {
 
+    fun getPdfPageCount(context: Context, pdfUri: Uri): Int {
+        var pfd: ParcelFileDescriptor? = null
+        var renderer: PdfRenderer? = null
+        return try {
+            pfd = context.contentResolver.openFileDescriptor(pdfUri, "r")
+            if (pfd != null) {
+                renderer = PdfRenderer(pfd)
+                renderer.pageCount
+            } else 0
+        } catch (e: Exception) {
+            e.printStackTrace()
+            0
+        } finally {
+            try {
+                renderer?.close()
+                pfd?.close()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
     suspend fun importPdf(
         context: Context,
         pdfUri: Uri,
-        storageManager: StorageManager
+        storageManager: StorageManager,
+        startPage: Int = 0,
+        endPage: Int = -1,
+        filterMode: FilterMode = FilterMode.AUTO,
+        onProgress: suspend (current: Int, total: Int) -> Unit = { _, _ -> }
     ): List<Pair<String, String>> = withContext(Dispatchers.IO) {
         val resultPages = mutableListOf<Pair<String, String>>()
         var pfd: ParcelFileDescriptor? = null
@@ -28,9 +54,14 @@ object PdfImporter {
             pfd = context.contentResolver.openFileDescriptor(pdfUri, "r")
             if (pfd != null) {
                 renderer = PdfRenderer(pfd)
-                val pageCount = renderer.pageCount
+                val totalPages = renderer.pageCount
+                val start = startPage.coerceIn(0, totalPages - 1)
+                val end = if (endPage < 0) totalPages - 1 else endPage.coerceIn(start, totalPages - 1)
+                val countToProcess = (end - start + 1).coerceAtLeast(1)
 
-                for (i in 0 until pageCount) {
+                var processed = 0
+                for (i in start..end) {
+                    onProgress(processed + 1, countToProcess)
                     val page = renderer.openPage(i)
                     // Render page at 2x scale for sharp text scan quality (~200 DPI)
                     val scale = 2.0f
@@ -45,11 +76,19 @@ object PdfImporter {
                     page.close()
 
                     val origPath = storageManager.saveBitmap(bitmap, isOriginal = true)
-                    val enhanced = DocumentEnhancer.enhance(bitmap, FilterMode.AUTO)
-                    val procPath = storageManager.saveBitmap(enhanced, isOriginal = false)
+                    val processedBitmap = if (filterMode == FilterMode.ORIGINAL) {
+                        DocumentProcessor.formatToA4Canvas(bitmap)
+                    } else {
+                        DocumentProcessor.processImage(bitmap, filterMode)
+                    }
+                    val procPath = storageManager.saveBitmap(processedBitmap, isOriginal = false)
 
                     resultPages.add(Pair(origPath, procPath))
                     bitmap.recycle()
+                    if (processedBitmap != bitmap) {
+                        processedBitmap.recycle()
+                    }
+                    processed++
                 }
             }
         } catch (e: Exception) {

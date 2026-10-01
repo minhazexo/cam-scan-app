@@ -6,12 +6,14 @@ import android.graphics.PointF
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.camscan.app.CamScanApplication
 import com.camscan.app.data.repository.DocumentRepository
 import com.camscan.app.domain.model.CornerPoints
 import com.camscan.app.domain.processor.DocumentDetector
 import com.camscan.app.domain.processor.DocumentEnhancer
 import com.camscan.app.domain.processor.PerspectiveWarper
 import com.camscan.app.domain.model.FilterMode
+import com.camscan.app.domain.processor.DocumentProcessor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
@@ -71,9 +73,10 @@ class CornerAdjustViewModel(private val repository: DocumentRepository) : ViewMo
             val bitmap = originalBitmap.value ?: return@launch
             val warped = PerspectiveWarper.warpToRectangle(bitmap, corners.value)
             val enhanced = DocumentEnhancer.enhance(warped, FilterMode.AUTO)
+            val a4Formatted = DocumentProcessor.formatToA4Canvas(enhanced)
 
-            val app = context.applicationContext as com.camscan.app.CamScanApplication
-            val procPath = app.storageManager.saveBitmap(enhanced, isOriginal = false)
+            val app = context.applicationContext as CamScanApplication
+            val procPath = app.storageManager.saveBitmap(a4Formatted, isOriginal = false)
 
             val targetDocId = if (documentId.isNullOrBlank()) {
                 val doc = repository.createDocument(

@@ -5,6 +5,7 @@ import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.camscan.app.CamScanApplication
 import com.camscan.app.data.repository.DocumentRepository
 import com.camscan.app.domain.model.DocumentModel
 import com.camscan.app.domain.model.PageModel
@@ -12,6 +13,8 @@ import com.camscan.app.domain.processor.DocumentEnhancer
 import com.camscan.app.domain.processor.OcrEngine
 import com.camscan.app.domain.processor.PdfGenerator
 import com.camscan.app.domain.model.FilterMode
+import com.camscan.app.domain.processor.DocumentProcessor
+import com.camscan.app.domain.processor.PdfImporter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -38,6 +41,8 @@ class DocumentDetailViewModel(private val repository: DocumentRepository) : View
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val isProcessing = MutableStateFlow(false)
+    val isProcessingPdf = MutableStateFlow(false)
+    val pdfProgressText = MutableStateFlow("Importing PDF...")
     val batchOcrResult = MutableStateFlow<String?>(null)
 
     fun loadDocument(id: String) {
@@ -65,15 +70,15 @@ class DocumentDetailViewModel(private val repository: DocumentRepository) : View
     fun addPagesFromGallery(context: Context, uris: List<Uri>) {
         viewModelScope.launch(Dispatchers.IO) {
             val docId = documentId.value ?: return@launch
-            val app = context.applicationContext as com.camscan.app.CamScanApplication
+            val app = context.applicationContext as CamScanApplication
 
             uris.forEach { uri ->
                 val origPath = app.storageManager.saveUriToOriginalFile(uri)
                 if (origPath != null) {
                     val bitmap = app.storageManager.loadBitmap(origPath)
                     if (bitmap != null) {
-                        val enhanced = DocumentEnhancer.enhance(bitmap, FilterMode.AUTO)
-                        val procPath = app.storageManager.saveBitmap(enhanced, isOriginal = false)
+                        val processed = DocumentProcessor.processImage(bitmap, FilterMode.AUTO)
+                        val procPath = app.storageManager.saveBitmap(processed, isOriginal = false)
                         repository.addPageToDocument(docId, origPath, procPath)
                     }
                 }
@@ -84,15 +89,26 @@ class DocumentDetailViewModel(private val repository: DocumentRepository) : View
     fun addPdfPagesFromGallery(context: Context, pdfUri: Uri) {
         viewModelScope.launch(Dispatchers.IO) {
             val docId = documentId.value ?: return@launch
-            val app = context.applicationContext as com.camscan.app.CamScanApplication
-            val pagePairs = com.camscan.app.domain.processor.PdfImporter.importPdf(
+            withContext(Dispatchers.Main) {
+                isProcessingPdf.value = true
+                pdfProgressText.value = "Importing PDF pages..."
+            }
+            val app = context.applicationContext as CamScanApplication
+            val pagePairs = PdfImporter.importPdf(
                 context = context,
                 pdfUri = pdfUri,
                 storageManager = app.storageManager
-            )
+            ) { current, total ->
+                withContext(Dispatchers.Main) {
+                    pdfProgressText.value = "Scanning page $current of $total..."
+                }
+            }
 
             pagePairs.forEach { pair ->
                 repository.addPageToDocument(docId, pair.first, pair.second)
+            }
+            withContext(Dispatchers.Main) {
+                isProcessingPdf.value = false
             }
         }
     }
@@ -116,7 +132,7 @@ class DocumentDetailViewModel(private val repository: DocumentRepository) : View
     fun exportPdf(context: Context, onComplete: (Uri?) -> Unit) {
         viewModelScope.launch(Dispatchers.IO) {
             val doc = document.value ?: return@launch
-            val app = context.applicationContext as com.camscan.app.CamScanApplication
+            val app = context.applicationContext as CamScanApplication
             val pagePaths = pages.value.map { it.processedImagePath }
 
             val pdfFile = File(context.cacheDir, "${doc.title}.pdf")

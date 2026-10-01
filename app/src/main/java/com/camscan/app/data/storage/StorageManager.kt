@@ -90,23 +90,39 @@ class StorageManager(private val context: Context) {
     }
 
     fun getInputPdfFolder(): File {
-        val dir = File(
-            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS),
-            "CamScan/InputPDFs"
-        )
+        val dir = try {
+            File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS),
+                "CamScan/InputPDFs"
+            )
+        } catch (e: Exception) {
+            File(context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS), "CamScan/InputPDFs")
+        }
         if (!dir.exists()) {
-            dir.mkdirs()
+            try {
+                dir.mkdirs()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
         return dir
     }
 
     fun getScannedPdfFolder(): File {
-        val dir = File(
-            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS),
-            "CamScan/ScannedPDFs"
-        )
+        val dir = try {
+            File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS),
+                "CamScan/ScannedPDFs"
+            )
+        } catch (e: Exception) {
+            File(context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS), "CamScan/ScannedPDFs")
+        }
         if (!dir.exists()) {
-            dir.mkdirs()
+            try {
+                dir.mkdirs()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
         return dir
     }
