@@ -9,5 +9,7 @@ data class PageModel(
     val filterMode: FilterMode,
     val rotationDegrees: Int,
     val cropCorners: CornerPoints,
-    val ocrText: String? = null
+    val ocrText: String? = null,
+    /** True while the page is a low-confidence placeholder awaiting corner fix. */
+    val needsManualCorrection: Boolean = false
 )

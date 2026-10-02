@@ -80,9 +80,19 @@ class HomeViewModel(private val repository: DocumentRepository) : ViewModel() {
                 if (origPath != null) {
                     val bitmap = storageManager.loadBitmap(origPath)
                     if (bitmap != null) {
-                        val processed = DocumentProcessor.processImage(bitmap, FilterMode.AUTO)
-                        val procPath = storageManager.saveBitmap(processed, isOriginal = false)
-                        pagePairs.add(Pair(origPath, procPath))
+                        try {
+                            val result = DocumentProcessor.processImageStrict(bitmap, FilterMode.AUTO, null)
+                            result.documentOnly.recycle()
+                            val procPath = storageManager.saveBitmap(result.a4, isOriginal = false)
+                            if (!result.a4.isRecycled) result.a4.recycle()
+                            pagePairs.add(Pair(origPath, procPath))
+                        } catch (e: com.camscan.app.domain.processor.NeedsManualCornersException) {
+                            // LOW confidence: keep the original pending manual
+                            // corner correction instead of a fake full-photo scan.
+                            pagePairs.add(Pair(origPath, origPath))
+                        } finally {
+                            if (!bitmap.isRecycled) bitmap.recycle()
+                        }
                     }
                 }
             }
@@ -183,11 +193,25 @@ class HomeViewModel(private val repository: DocumentRepository) : ViewModel() {
     fun exportDocumentPdf(
         context: Context,
         document: DocumentModel,
-        onComplete: (Uri?) -> Unit
+        onComplete: (Uri?, String?) -> Unit
     ) {
         viewModelScope.launch(Dispatchers.IO) {
             val app = context.applicationContext as CamScanApplication
             val pages = repository.getPagesForDocument(document.id)
+
+            // Never ship a placeholder page into a PDF: pages still awaiting
+            // corner correction are raw renders, not scans.
+            val pending = pages.count { it.needsManualCorrection }
+            if (pending > 0) {
+                withContext(Dispatchers.Main) {
+                    onComplete(
+                        null,
+                        "Please correct $pending page${if (pending == 1) "" else "s"} before exporting"
+                    )
+                }
+                return@launch
+            }
+
             val paths = pages.map { it.processedImagePath }
 
             val pdfFile = File(context.cacheDir, "${document.title}.pdf")
@@ -195,7 +219,7 @@ class HomeViewModel(private val repository: DocumentRepository) : ViewModel() {
             val exportedUri = app.storageManager.exportScannedPdfToDedicatedFolder(pdfFile, document.title)
 
             withContext(Dispatchers.Main) {
-                onComplete(exportedUri)
+                onComplete(exportedUri, null)
             }
         }
     }

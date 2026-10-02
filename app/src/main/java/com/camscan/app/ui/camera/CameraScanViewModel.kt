@@ -11,12 +11,11 @@ import androidx.lifecycle.viewModelScope
 import com.camscan.app.data.repository.DocumentRepository
 import com.camscan.app.domain.model.CornerPoints
 import com.camscan.app.domain.processor.DocumentDetector
-import com.camscan.app.domain.processor.DocumentEnhancer
-import com.camscan.app.domain.model.FilterMode
 import com.camscan.app.domain.processor.DocumentProcessor
+import com.camscan.app.domain.model.FilterMode
+import com.camscan.app.domain.processor.NeedsManualCornersException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -48,11 +47,22 @@ class CameraScanViewModel(private val repository: DocumentRepository) : ViewMode
         isBatchMode.value = !isBatchMode.value
     }
 
+    /**
+     * Captures a photo and saves ONLY the original. The actual scan is built
+     * in the corner-adjust screen (automatic HIGH quad shown for one-tap
+     * confirm, MEDIUM shown for confirmation, LOW forcing manual corners).
+     * This guarantees the full photograph can never become the "scan".
+     *
+     * Single mode: no document/page rows are created here; the corner editor
+     * creates them on CONFIRM. Batch mode: each capture is scanned inline —
+     * HIGH/MEDIUM quads produce real A4 pages, LOW captures are kept as
+     * originals pending manual corner correction (never a fake scan).
+     */
     fun processCapturedPhoto(
         context: Context,
         imageProxy: ImageProxy,
         documentId: String?,
-        onComplete: (String?, String) -> Unit // documentId, savedOriginalPath
+        onComplete: (String?, String, Boolean) -> Unit // documentId, savedOriginalPath, needsManual
     ) {
         viewModelScope.launch(Dispatchers.IO) {
             isProcessing.value = true
@@ -65,35 +75,58 @@ class CameraScanViewModel(private val repository: DocumentRepository) : ViewMode
                 val rotatedBitmap = Bitmap.createBitmap(rawBitmap, 0, 0, rawBitmap.width, rawBitmap.height, matrix, true)
 
                 val origPath = storageManager.saveBitmap(rotatedBitmap, isOriginal = true)
-                val processed = DocumentProcessor.processImage(rotatedBitmap, FilterMode.AUTO)
-                val procPath = storageManager.saveBitmap(processed, isOriginal = false)
 
                 if (isBatchMode.value) {
-                    capturedPages.value = capturedPages.value + Pair(origPath, procPath)
-                    isProcessing.value = false
-                } else {
-                    if (documentId.isNullOrBlank()) {
-                        val doc = repository.createDocument(
-                            title = "Scan_${System.currentTimeMillis() / 1000}",
-                            pages = listOf(Pair(origPath, procPath))
-                        )
-                        withContext(Dispatchers.Main) {
-                            isProcessing.value = false
-                            onComplete(doc.id, origPath)
+                    // Inline strict scan per capture; LOW -> pending original.
+                    var procPath: String? = null
+                    var needsManual: Boolean
+                    try {
+                        val result = withContext(Dispatchers.Default) {
+                            DocumentProcessor.processImageStrict(rotatedBitmap, FilterMode.AUTO, null)
                         }
-                    } else {
-                        repository.addPageToDocument(documentId, origPath, procPath)
-                        withContext(Dispatchers.Main) {
-                            isProcessing.value = false
-                            onComplete(documentId, origPath)
-                        }
+                        result.documentOnly.recycle()
+                        procPath = storageManager.saveBitmap(result.a4, isOriginal = false)
+                        if (!result.a4.isRecycled) result.a4.recycle()
+                        needsManual = result.needsConfirmation
+                    } catch (e: NeedsManualCornersException) {
+                        needsManual = true
                     }
+                    val finalProc = procPath ?: origPath // pending: correct via corner editor
+                    capturedPages.value = capturedPages.value + Pair(origPath, finalProc)
+                    isProcessing.value = false
+                    withContext(Dispatchers.Main) {
+                        onComplete(documentId, origPath, needsManual)
+                    }
+                } else {
+                    // Single: defer everything to the corner editor.
+                    val needsManual = try {
+                        withContext(Dispatchers.Default) {
+                            DocumentDetector.detectDocument(rotatedBitmap, fast = false).needsManual
+                        }
+                    } catch (e: Exception) {
+                        true
+                    }
+                    if (!rotatedBitmap.isRecycled) rotatedBitmap.recycle()
+                    if (!rawBitmap.isRecycled && rawBitmap != rotatedBitmap) rawBitmap.recycle()
+                    withContext(Dispatchers.Main) {
+                        isProcessing.value = false
+                        onComplete(documentId, origPath, needsManual)
+                    }
+                    return@launch
                 }
+                if (!rotatedBitmap.isRecycled) rotatedBitmap.recycle()
+                if (!rawBitmap.isRecycled && rawBitmap != rotatedBitmap) rawBitmap.recycle()
             } catch (e: Exception) {
                 e.printStackTrace()
-                isProcessing.value = false
+                withContext(Dispatchers.Main) {
+                    isProcessing.value = false
+                }
             } finally {
-                imageProxy.close()
+                try {
+                    imageProxy.close()
+                } catch (e: Exception) {
+                    // already closed
+                }
             }
         }
     }
@@ -111,6 +144,12 @@ class CameraScanViewModel(private val repository: DocumentRepository) : ViewMode
                     title = "Scan_${System.currentTimeMillis() / 1000}",
                     pages = pages
                 )
+                // Pages that fell back to the raw capture (orig == proc) are
+                // not scans; flag them so the user fixes corners before export.
+                repository.markPagesPending(
+                    doc.id,
+                    pages.filter { it.first == it.second }.map { it.first }
+                )
                 withContext(Dispatchers.Main) {
                     onComplete(doc.id)
                 }
@@ -125,6 +164,11 @@ class CameraScanViewModel(private val repository: DocumentRepository) : ViewMode
         }
     }
 
+    /**
+     * Gallery import through the strict pipeline. Pages with LOW detection
+     * are kept as originals pending manual corner correction instead of
+     * being fabricated into full-photo "scans".
+     */
     fun importImagesFromGallery(
         context: Context,
         uris: List<Uri>,
@@ -142,9 +186,18 @@ class CameraScanViewModel(private val repository: DocumentRepository) : ViewMode
                 if (origPath != null) {
                     val bitmap = storageManager.loadBitmap(origPath)
                     if (bitmap != null) {
-                        val processed = DocumentProcessor.processImage(bitmap, FilterMode.AUTO)
-                        val procPath = storageManager.saveBitmap(processed, isOriginal = false)
-                        pagePairs.add(Pair(origPath, procPath))
+                        try {
+                            val result = DocumentProcessor.processImageStrict(bitmap, FilterMode.AUTO, null)
+                            result.documentOnly.recycle()
+                            val procPath = storageManager.saveBitmap(result.a4, isOriginal = false)
+                            if (!result.a4.isRecycled) result.a4.recycle()
+                            pagePairs.add(Pair(origPath, procPath))
+                        } catch (e: NeedsManualCornersException) {
+                            // Pending manual correction via the corner editor.
+                            pagePairs.add(Pair(origPath, origPath))
+                        } finally {
+                            if (!bitmap.isRecycled) bitmap.recycle()
+                        }
                     }
                 }
             }

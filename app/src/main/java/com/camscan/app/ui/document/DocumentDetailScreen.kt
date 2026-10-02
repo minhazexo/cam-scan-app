@@ -39,6 +39,7 @@ import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.TextFields
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -346,6 +347,35 @@ fun PageItemCard(
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold
                     )
+                }
+
+                // Amber warning: this page is a raw render awaiting a corner fix.
+                if (page.needsManualCorrection) {
+                    Row(
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .padding(8.dp)
+                            .background(
+                                Color(0xFFFFA000),
+                                shape = RoundedCornerShape(6.dp)
+                            )
+                            .padding(horizontal = 6.dp, vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Default.Warning,
+                            contentDescription = "Needs correction",
+                            tint = Color.Black,
+                            modifier = Modifier.size(12.dp)
+                        )
+                        Spacer(Modifier.size(4.dp))
+                        Text(
+                            text = "Needs fix",
+                            color = Color.Black,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
             }
 

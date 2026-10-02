@@ -291,12 +291,14 @@ fun HomeScreen(
                             },
                             onDelete = { viewModel.deleteDocument(doc.id) },
                             onExportPdf = {
-                                viewModel.exportDocumentPdf(context, doc) { uri ->
-                                    if (uri != null) {
-                                        Toast.makeText(context, "Saved to Documents/CamScan/ScannedPDFs", Toast.LENGTH_SHORT).show()
-                                    }
-                                }
-                            }
+                    viewModel.exportDocumentPdf(context, doc) { uri, error ->
+                        if (uri != null) {
+                            Toast.makeText(context, "Saved to Documents/CamScan/ScannedPDFs", Toast.LENGTH_SHORT).show()
+                        } else if (error != null) {
+                            Toast.makeText(context, error, Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }
                         )
                     }
                 }

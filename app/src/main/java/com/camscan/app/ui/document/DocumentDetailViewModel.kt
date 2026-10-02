@@ -77,9 +77,18 @@ class DocumentDetailViewModel(private val repository: DocumentRepository) : View
                 if (origPath != null) {
                     val bitmap = app.storageManager.loadBitmap(origPath)
                     if (bitmap != null) {
-                        val processed = DocumentProcessor.processImage(bitmap, FilterMode.AUTO)
-                        val procPath = app.storageManager.saveBitmap(processed, isOriginal = false)
-                        repository.addPageToDocument(docId, origPath, procPath)
+                        try {
+                            val result = DocumentProcessor.processImageStrict(bitmap, FilterMode.AUTO, null)
+                            result.documentOnly.recycle()
+                            val procPath = app.storageManager.saveBitmap(result.a4, isOriginal = false)
+                            if (!result.a4.isRecycled) result.a4.recycle()
+                            repository.addPageToDocument(docId, origPath, procPath)
+                        } catch (e: com.camscan.app.domain.processor.NeedsManualCornersException) {
+                            // LOW confidence: keep pending manual correction.
+                            repository.addPageToDocument(docId, origPath, origPath)
+                        } finally {
+                            if (!bitmap.isRecycled) bitmap.recycle()
+                        }
                     }
                 }
             }

@@ -382,7 +382,7 @@ fun CameraScanScreen(
                                             context = context,
                                             imageProxy = image,
                                             documentId = documentId,
-                                            onComplete = { docId, origPath ->
+                                            onComplete = { docId, origPath, _ ->
                                                 if (!isBatchMode) {
                                                     onNavigateToCornerAdjust(docId, origPath)
                                                 }

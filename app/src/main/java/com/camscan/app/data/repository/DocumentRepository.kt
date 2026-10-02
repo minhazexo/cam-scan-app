@@ -69,7 +69,10 @@ class DocumentRepository(
                     filterMode = FilterMode.AUTO.name,
                     rotationDegrees = 0,
                     cropCornersJson = cornerPointsToJson(CornerPoints.defaultNormalized()),
-                    ocrText = null
+                    ocrText = null,
+                    // A "page" whose processed image is just a copy of the
+                    // original means detection failed; flag it for the user.
+                    needsManualCorrection = if (pair.first == pair.second) 1 else 0
                 )
             }
 
@@ -107,7 +110,8 @@ class DocumentRepository(
                 filterMode = FilterMode.AUTO.name,
                 rotationDegrees = 0,
                 cropCornersJson = cornerPointsToJson(CornerPoints.defaultNormalized()),
-                ocrText = null
+                ocrText = null,
+                needsManualCorrection = if (originalPath == processedPath) 1 else 0
             )
             pageDao.insertPage(pageEntity)
 
@@ -136,7 +140,8 @@ class DocumentRepository(
                 filterMode = page.filterMode.name,
                 rotationDegrees = page.rotationDegrees,
                 cropCornersJson = cornerPointsToJson(page.cropCorners),
-                ocrText = page.ocrText
+                ocrText = page.ocrText,
+                needsManualCorrection = if (page.needsManualCorrection) 1 else 0
             )
             pageDao.updatePage(entity)
 
@@ -159,7 +164,8 @@ class DocumentRepository(
                     filterMode = page.filterMode.name,
                     rotationDegrees = page.rotationDegrees,
                     cropCornersJson = cornerPointsToJson(page.cropCorners),
-                    ocrText = page.ocrText
+                    ocrText = page.ocrText,
+                    needsManualCorrection = if (page.needsManualCorrection) 1 else 0
                 )
             }
             pageDao.insertPages(entities)
@@ -251,8 +257,31 @@ class DocumentRepository(
         filterMode = FilterMode.fromString(filterMode),
         rotationDegrees = rotationDegrees,
         cropCorners = jsonToCornerPoints(cropCornersJson),
-        ocrText = ocrText
+        ocrText = ocrText,
+        needsManualCorrection = needsManualCorrection == 1
     )
+
+    /** Marks the given pages (by original path) as awaiting corner correction. */
+    suspend fun markPagesPending(documentId: String, originalPaths: List<String>) {
+        if (originalPaths.isEmpty()) return
+        withContext(Dispatchers.IO) {
+            pageDao.markPagesPending(documentId, originalPaths)
+        }
+    }
+
+    /**
+     * Applies a manual corner fix. Returns true when an existing page was
+     * updated (rather than a new page being appended).
+     */
+    suspend fun applyCorners(originalPath: String, processedPath: String, corners: CornerPoints): Boolean {
+        return withContext(Dispatchers.IO) {
+            pageDao.applyCorners(
+                originalPath,
+                processedPath,
+                cornerPointsToJson(corners)
+            ) > 0
+        }
+    }
 
     companion object {
         fun cornerPointsToJson(points: CornerPoints): String {

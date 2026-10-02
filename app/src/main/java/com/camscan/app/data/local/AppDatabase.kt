@@ -11,7 +11,7 @@ import com.camscan.app.data.local.entity.PageEntity
 
 @Database(
     entities = [DocumentEntity::class, PageEntity::class],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {

@@ -27,5 +27,7 @@ data class PageEntity(
     val filterMode: String,
     val rotationDegrees: Int,
     val cropCornersJson: String?,
-    val ocrText: String?
+    val ocrText: String?,
+    /** 1 when the page still needs manual corner correction before export. */
+    val needsManualCorrection: Int = 0
 )
