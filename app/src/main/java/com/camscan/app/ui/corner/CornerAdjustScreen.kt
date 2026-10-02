@@ -410,6 +410,11 @@ private fun DebugStagesView(
                 fontSize = 12.sp
             )
         }
+        debugInfo.stats?.let { stats ->
+            DebugStageCard(title = "0. Detector diagnostics") {
+                DetectorDiagnostics(stats = stats)
+            }
+        }
         DebugStageCard(title = "1. Original → see editor view") { }
         debugInfo.edgePreview?.let {
             DebugStageCard(title = "2. Edge image (Canny)") { StageImage(bitmap = it) }
@@ -437,6 +442,55 @@ private fun DebugStagesView(
             color = Color.LightGray,
             fontSize = 12.sp
         )
+    }
+}
+
+@Composable
+private fun DetectorDiagnostics(stats: com.camscan.app.domain.processor.DocumentDetector.DetectionStats) {
+    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        DiagRow("OpenCV", if (stats.openCvUsed) "yes (native capture path)" else "no (Kotlin fallback)")
+        DiagRow("Input", "${stats.inputW}×${stats.inputH}")
+        DiagRow("Sample", "${stats.sampleW}×${stats.sampleH}")
+        DiagRow("Edge pixels", stats.edgePixels.toString())
+        DiagRow("Canny / adaptive", "${stats.cannyPasses} / ${stats.adaptivePasses}")
+        DiagRow("Components", "${stats.components} (big ${stats.bigComponents})")
+        DiagRow("approx4 / valid", "${stats.approxFour} / ${stats.validatedQuads}")
+        DiagRow("Candidates", "${stats.candidateCount} → ${stats.uniqueCandidateCount} unique")
+        DiagRow("Hough", "${stats.houghLines} lines / ${stats.houghQuads} quads")
+        DiagRow(
+            "Scores",
+            "sel=${"%.3f".format(stats.selectedScore)} " +
+                "2nd=${"%.3f".format(stats.secondScore)} " +
+                "cal=${"%.3f".format(stats.calibratedScore)}"
+        )
+        DiagRow("Confidence", "${stats.confidence} (score ${"%.3f".format(stats.selectedScore)})")
+        DiagRow("edge / polarity", "${"%.2f".format(stats.edgeSupport)} / ${"%.2f".format(stats.polarity)}")
+        DiagRow("contrast / aspect", "${"%.2f".format(stats.contrast)} / ${"%.2f".format(stats.aspect)}")
+        DiagRow("rectangularity", "%.2f".format(stats.rectangularity))
+        if (stats.selectedCorners.isNotEmpty()) {
+            DiagRow(
+                "Selected corners",
+                stats.selectedCorners.joinToString("  ") {
+                    "(${"%.2f".format(it.x)},${"%.2f".format(it.y)})"
+                }
+            )
+        }
+        if (stats.houghLineDesc.isNotEmpty()) {
+            DiagRow("Hough lines", stats.houghLineDesc.take(8).joinToString("; "))
+        }
+    }
+}
+
+@Composable
+private fun DiagRow(label: String, value: String) {
+    Row(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = label,
+            color = Color.LightGray,
+            fontSize = 11.sp,
+            modifier = Modifier.width(130.dp)
+        )
+        Text(text = value, color = Color.White, fontSize = 11.sp)
     }
 }
 

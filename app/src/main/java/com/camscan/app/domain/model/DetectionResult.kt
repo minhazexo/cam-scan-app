@@ -40,6 +40,57 @@ enum class DetectionAction {
 }
 
 /**
+ * State of the live camera overlay.
+ *
+ * The overlay must NEVER draw a fake document rectangle: a fixed
+ * 12%-88% inset was misleading because it implied a detection that did
+ * not happen. A quad is drawn only for [DETECTED] / [CONFIRMATION_REQUIRED];
+ * otherwise the UI shows a subtle "move closer" hint.
+ */
+enum class DetectionOverlayState {
+    /** No trustworthy candidate: show guidance, do NOT draw corners. */
+    NOT_DETECTED,
+
+    /** A confident quad is tracked; draw it solid. */
+    DETECTED,
+
+    /** A candidate exists but is uncertain; draw it dashed / ask to confirm. */
+    CONFIRMATION_REQUIRED
+}
+
+/**
+ * Live (per-preview-frame) detection result handed to the camera overlay.
+ *
+ * @param state overlay state.
+ * @param corners normalized quad, present only for [DetectionOverlayState.DETECTED]
+ *   and [DetectionOverlayState.CONFIRMATION_REQUIRED].
+ */
+data class LiveDetection(
+    val state: DetectionOverlayState,
+    val corners: CornerPoints? = null,
+    val confidence: DetectionConfidence = DetectionConfidence.LOW
+) {
+    /** True when the overlay should draw a document quad. */
+    val hasQuad: Boolean
+        get() = corners != null && state != DetectionOverlayState.NOT_DETECTED
+
+    companion object {
+        val NONE = LiveDetection(DetectionOverlayState.NOT_DETECTED, null, DetectionConfidence.LOW)
+
+        /** Maps a full [DetectionResult] to overlay state. */
+        fun from(result: DetectionResult): LiveDetection {
+            val corners = result.corners
+            return when {
+                corners == null -> NONE
+                result.confidence == DetectionConfidence.HIGH || result.digitalPage ->
+                    LiveDetection(DetectionOverlayState.DETECTED, corners, result.confidence)
+                else -> LiveDetection(DetectionOverlayState.CONFIRMATION_REQUIRED, corners, result.confidence)
+            }
+        }
+    }
+}
+
+/**
  * Result of [com.camscan.app.domain.processor.DocumentDetector.detectDocument].
  *
  * @param corners normalized (0..1) quad, ordered TL/TR/BR/BL.
@@ -90,6 +141,7 @@ data class ScoredQuad(
     val topRight: PointF,
     val bottomRight: PointF,
     val bottomLeft: PointF,
+    /** Final calibrated ranking score in 0..1 (higher = more document-like). */
     val score: Float,
     val areaScore: Float = 0f,
     val rectangularityScore: Float = 0f,
@@ -98,11 +150,24 @@ data class ScoredQuad(
     val aspectScore: Float = 0f,
     val borderScore: Float = 0f,
     val polarityScore: Float = 0f,
+    /** Weakest single-edge boundary polarity (0..1): a real page has a
+     *  luminance step on EVERY side, a texture patch does not. */
+    val polarityMinScore: Float = 0f,
     val parallelScore: Float = 0f,
     val contrastScore: Float = 0f,
     val textureScore: Float = 0f,
     val continuityScore: Float = 0f,
-    val areaFraction: Float = 0f
+    val areaFraction: Float = 0f,
+    /** Which discovery pass produced this candidate ([SOURCE_*]). */
+    val source: Int = SOURCE_CONTOUR,
+    /** Combined geometry evidence (rectangularity + angles + area). */
+    val geometryScore: Float = 0f,
+    /** Perspective/shape evidence (parallel edges + aspect plausibility). */
+    val perspectiveScore: Float = 0f,
+    /** Photometric evidence (polarity + contrast + texture). */
+    val photometricScore: Float = 0f,
+    /** Context evidence (frame margin / area plausibility). */
+    val contextScore: Float = 0f
 ) {
     fun toCornerPoints(sampleW: Float, sampleH: Float): CornerPoints {
         return CornerPoints(
@@ -111,5 +176,19 @@ data class ScoredQuad(
             PointF(bottomRight.x / sampleW, bottomRight.y / sampleH),
             PointF(bottomLeft.x / sampleW, bottomLeft.y / sampleH)
         )
+    }
+
+    /** Points as a list in TL/TR/BR/BL order. */
+    fun toList(): List<PointF> = listOf(topLeft, topRight, bottomRight, bottomLeft)
+
+    companion object {
+        /** Contour on a Canny edge map. */
+        const val SOURCE_CONTOUR = 0
+        /** Contour on an adaptive-threshold binary map. */
+        const val SOURCE_ADAPTIVE = 1
+        /** Lines intersected from a Hough transform. */
+        const val SOURCE_HOUGH = 2
+        /** Face/silhouette of a connected non-edge region (page body). */
+        const val SOURCE_REGION = 3
     }
 }

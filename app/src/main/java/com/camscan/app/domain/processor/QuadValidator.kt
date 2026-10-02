@@ -36,8 +36,10 @@ object QuadValidator {
     private const val MAX_ANGLE_DEG = 125.0
 
     /** Accepts portrait/landscape page shapes, rejects extreme slivers. */
-    private const val MIN_ASPECT = 0.35f
-    private const val MAX_ASPECT = 2.9f
+    // Receipts are legitimately long and narrow (up to ~5:1), so the aspect
+    // window must cover them; extreme slivers are still rejected.
+    private const val MIN_ASPECT = 0.20f
+    private const val MAX_ASPECT = 5.0f
 
     fun orderPoints(pts: List<PointF>): CornerPoints {
         if (pts.size != 4) return CornerPoints.defaultNormalized()
@@ -404,5 +406,104 @@ object QuadValidator {
         val perEdge = edgeMetrics(quad, ByteArray(w * h), gray, w, h, samplesPerEdge)
         if (perEdge.isEmpty()) return 0f
         return perEdge.map { it.second }.average().toFloat().coerceIn(0f, 1f)
+    }
+
+    /** Interior angles (degrees) at each of the four corners, in quad order. */
+    fun interiorAngles(quad: List<PointF>): List<Double> {
+        return (0 until 4).map { i ->
+            interiorAngleDeg(quad[i], quad[(i + 1) % 4], quad[(i + 2) % 4])
+        }
+    }
+
+    /**
+     * Maximum corresponding-corner distance between two quads, normalised by
+     * the image diagonal. Used to cluster near-identical candidates.
+     */
+    fun maxCornerDistance(a: List<PointF>, b: List<PointF>, imageW: Float, imageH: Float): Float {
+        if (a.size != 4 || b.size != 4) return Float.MAX_VALUE
+        val diag = hypot(imageW.toDouble(), imageH.toDouble()).toFloat().coerceAtLeast(1f)
+        var worst = 0f
+        for (i in 0 until 4) {
+            val d = hypot((a[i].x - b[i].x).toDouble(), (a[i].y - b[i].y).toDouble()).toFloat()
+            if (d > worst) worst = d
+        }
+        return worst / diag
+    }
+
+    /**
+     * Intersection-over-union of two convex quadrilaterals, area based.
+     * Used together with [maxCornerDistance] to treat quads that describe the
+     * SAME page (from different passes / epsilon values) as duplicates.
+     */
+    fun iou(a: List<PointF>, b: List<PointF>): Float {
+        if (a.size != 4 || b.size != 4) return 0f
+        val inter = clipConvex(a, b)
+        if (inter.size < 3) return 0f
+        val interArea = abs(polygonArea(inter))
+        val union = abs(polygonArea(a)) + abs(polygonArea(b)) - interArea
+        if (union <= 1e-6f) return 0f
+        return (interArea / union).coerceIn(0f, 1f)
+    }
+
+    /** Sutherland-Hodgman clip of convex polygon [subject] against convex [clip]. */
+    private fun clipConvex(subject: List<PointF>, clip: List<PointF>): List<PointF> {
+        var output = subject.toMutableList()
+        val clipCcw = signedArea(clip) > 0f
+        for (i in clip.indices) {
+            if (output.isEmpty()) break
+            val a = clip[i]
+            val b = clip[(i + 1) % clip.size]
+            val input = output
+            output = mutableListOf()
+            fun inside(p: PointF): Boolean {
+                val cross = (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)
+                return if (clipCcw) cross >= -1e-4f else cross <= 1e-4f
+            }
+            var prev = input.last()
+            for (cur in input) {
+                val curIn = inside(cur)
+                val prevIn = inside(prev)
+                if (curIn) {
+                    if (!prevIn) lineIntersection(prev, cur, a, b)?.let { output.add(it) }
+                    output.add(cur)
+                } else if (prevIn) {
+                    lineIntersection(prev, cur, a, b)?.let { output.add(it) }
+                }
+                prev = cur
+            }
+        }
+        return output
+    }
+
+    private fun signedArea(pts: List<PointF>): Float = polygonArea(pts)
+
+    private fun lineIntersection(p1: PointF, p2: PointF, p3: PointF, p4: PointF): PointF? {
+        val d = (p1.x - p2.x) * (p3.y - p4.y) - (p1.y - p2.y) * (p3.x - p4.x)
+        if (abs(d) < 1e-9f) return null
+        val a = p1.x * p2.y - p1.y * p2.x
+        val b = p3.x * p4.y - p3.y * p4.x
+        val x = (a * (p3.x - p4.x) - (p1.x - p2.x) * b) / d
+        val y = (a * (p3.y - p4.y) - (p1.y - p2.y) * b) / d
+        return PointF(x, y)
+    }
+
+    /**
+     * Perspective plausibility: a real page under perspective still has four
+     * corners whose opposite edges converge only modestly, and whose diagonal
+     * ratio is not extreme. Rejects wildly distorted / bow-tie-like quads.
+     */
+    fun perspectivePlausibility(quad: List<PointF>): Float {
+        if (quad.size != 4) return 0f
+        val angles = interiorAngles(quad)
+        val anglePenalty = angles.map { abs(it - 90.0) / 60.0 }.maxOrNull() ?: 1.0
+        fun len(a: PointF, b: PointF) = hypot((a.x - b.x).toDouble(), (a.y - b.y).toDouble())
+        val top = len(quad[0], quad[1])
+        val bottom = len(quad[2], quad[3])
+        val left = len(quad[0], quad[3])
+        val right = len(quad[1], quad[2])
+        val vRatio = if (max(top, bottom) > 1e-6) min(top, bottom) / max(top, bottom) else 0.0
+        val hRatio = if (max(left, right) > 1e-6) min(left, right) / max(left, right) else 0.0
+        val consistency = ((vRatio + hRatio) / 2.0).toFloat()
+        return ((1f - anglePenalty.toFloat() * 0.7f) * 0.4f + consistency * 0.6f).coerceIn(0f, 1f)
     }
 }

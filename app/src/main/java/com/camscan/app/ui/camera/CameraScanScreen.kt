@@ -102,7 +102,7 @@ fun CameraScanScreen(
         }
     }
 
-    val detectedCorners by viewModel.detectedCorners.collectAsState()
+    val liveDetection by viewModel.liveDetection.collectAsState()
     val isBatchMode by viewModel.isBatchMode.collectAsState()
     val capturedPages by viewModel.capturedPages.collectAsState()
     val isProcessing by viewModel.isProcessing.collectAsState()
@@ -184,7 +184,7 @@ fun CameraScanScreen(
 
         // Live Document Corner Quad Overlay
         CameraOverlay(
-            corners = detectedCorners,
+            detection = liveDetection,
             modifier = Modifier.fillMaxSize()
         )
 

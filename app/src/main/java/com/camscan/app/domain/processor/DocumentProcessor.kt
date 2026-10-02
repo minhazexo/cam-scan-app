@@ -423,7 +423,8 @@ object DocumentProcessor {
         val deskewedPreview: Bitmap?,
         val dewarpedPreview: Bitmap?,
         val enhancedPreview: Bitmap?,
-        val detection: DetectionResult?
+        val detection: DetectionResult?,
+        val stats: DocumentDetector.DetectionStats? = null
     )
 
     fun buildDebugInfo(bitmap: Bitmap, detection: DetectionResult? = null): ScanDebugInfo {
@@ -471,7 +472,10 @@ object DocumentProcessor {
         } catch (e: Exception) {
             // Debug only; ignore stage failures.
         }
-        return ScanDebugInfo(edges, cands, sel, perspective, deskewed, dewarped, enhanced, result)
+        return ScanDebugInfo(
+            edges, cands, sel, perspective, deskewed, dewarped, enhanced, result,
+            DocumentDetector.lastStats
+        )
     }
 
     private fun downscaleForDebug(bitmap: Bitmap): Bitmap {

@@ -10,8 +10,11 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.camscan.app.data.repository.DocumentRepository
 import com.camscan.app.domain.model.CornerPoints
+import com.camscan.app.domain.model.DetectionOverlayState
+import com.camscan.app.domain.model.LiveDetection
 import com.camscan.app.domain.processor.DocumentDetector
 import com.camscan.app.domain.processor.DocumentProcessor
+import com.camscan.app.domain.processor.QuadValidator
 import com.camscan.app.domain.model.FilterMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -20,26 +23,82 @@ import kotlinx.coroutines.withContext
 
 class CameraScanViewModel(private val repository: DocumentRepository) : ViewModel() {
 
-    val detectedCorners = MutableStateFlow(CornerPoints.defaultNormalized())
+    /**
+     * Live overlay state. NOT_DETECTED carries no corners, so the UI never
+     * draws a fake document rectangle (Phase 10).
+     */
+    val liveDetection = MutableStateFlow(LiveDetection.NONE)
     val isBatchMode = MutableStateFlow(false)
     val capturedPages = MutableStateFlow<List<Pair<String, String>>>(emptyList())
     val isProcessing = MutableStateFlow(false)
 
+    /** Throttle live analysis to ~8 fps and smooth corners across frames. */
+    @Volatile
+    private var lastAnalysisMs = 0L
+    private var smoothedCorners: CornerPoints? = null
+
     fun onFrameAnalyzed(imageProxy: ImageProxy) {
+        val now = System.currentTimeMillis()
+        if (now - lastAnalysisMs < ANALYSIS_INTERVAL_MS) {
+            // Skip this frame to keep the preview smooth; still release it.
+            imageProxy.close()
+            return
+        }
+        lastAnalysisMs = now
         viewModelScope.launch(Dispatchers.Default) {
+            var bitmap: Bitmap? = null
+            var rotated: Bitmap? = null
             try {
-                val bitmap = imageProxy.toBitmap()
+                bitmap = imageProxy.toBitmap()
                 val matrix = Matrix().apply { postRotate(imageProxy.imageInfo.rotationDegrees.toFloat()) }
-                val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
-                val corners = DocumentDetector.detectCorners(rotated)
-                detectedCorners.value = corners
-                if (rotated != bitmap) rotated.recycle()
+                rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+                val raw = DocumentDetector.detectLive(rotated)
+                liveDetection.value = stabilize(raw)
             } catch (e: Exception) {
                 e.printStackTrace()
             } finally {
-                imageProxy.close()
+                if (rotated != null && rotated != bitmap && !rotated.isRecycled) rotated.recycle()
+                if (bitmap != null && !bitmap.isRecycled) bitmap.recycle()
+                try {
+                    imageProxy.close()
+                } catch (e: Exception) {
+                    // already closed
+                }
             }
         }
+    }
+
+    /**
+     * Temporal stability (Phase 12): do not jump between candidates every
+     * frame. When the same document remains detected and corners move only a
+     * little, blend with an exponential moving average. A large jump resets
+     * the history so a new document snaps into place immediately.
+     */
+    private fun stabilize(next: LiveDetection): LiveDetection {
+        val nextCorners = next.corners
+        if (nextCorners == null || next.state == DetectionOverlayState.NOT_DETECTED) {
+            smoothedCorners = null
+            return next
+        }
+        val previous = smoothedCorners
+        if (previous != null) {
+            val moved = QuadValidator.maxCornerDistance(previous.toList(), nextCorners.toList(), 1f, 1f)
+            if (moved < MAX_TRACK_JUMP) {
+                val a = SMOOTHING_ALPHA
+                fun lerp(p: android.graphics.PointF, q: android.graphics.PointF) =
+                    android.graphics.PointF(p.x + (q.x - p.x) * a, p.y + (q.y - p.y) * a)
+                val blended = CornerPoints(
+                    lerp(previous.topLeft, nextCorners.topLeft),
+                    lerp(previous.topRight, nextCorners.topRight),
+                    lerp(previous.bottomRight, nextCorners.bottomRight),
+                    lerp(previous.bottomLeft, nextCorners.bottomLeft)
+                )
+                smoothedCorners = blended
+                return next.copy(corners = blended)
+            }
+        }
+        smoothedCorners = nextCorners
+        return next
     }
 
     fun toggleBatchMode() {
@@ -267,6 +326,14 @@ class CameraScanViewModel(private val repository: DocumentRepository) : ViewMode
                 }
             }
         }
+    }
+
+    companion object {
+        /** ~8 live analyses per second. */
+        private const val ANALYSIS_INTERVAL_MS = 120L
+        private const val SMOOTHING_ALPHA = 0.4f
+        /** Max normalized corner movement still considered the same document. */
+        private const val MAX_TRACK_JUMP = 0.12f
     }
 
     class Factory(private val repository: DocumentRepository) : ViewModelProvider.Factory {

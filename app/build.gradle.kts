@@ -88,6 +88,11 @@ dependencies {
     implementation("androidx.room:room-ktx:$roomVersion")
     ksp("androidx.room:room-compiler:$roomVersion")
 
+    // OpenCV (native AAR from Maven Central). Used for the full-quality
+    // capture path (edge extraction + perspective warp); the pure-Kotlin
+    // engine remains the fallback and the live/Robolectric path.
+    implementation("org.opencv:opencv:4.10.0")
+
     // ML Kit Text Recognition (OCR)
     implementation("com.google.android.gms:play-services-mlkit-text-recognition:19.0.0")
 
@@ -104,4 +109,9 @@ dependencies {
     // Unit tests (Robolectric provides android.graphics for detector tests)
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.13")
+
+    // Instrumented tests (run on device/emulator; exercise OpenCV native libs)
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test:core:1.6.1")
 }

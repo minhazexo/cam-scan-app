@@ -100,6 +100,19 @@ object PerspectiveWarper {
                 outW.toDouble(), outH.toDouble(),
                 0.0, outH.toDouble()
             )
+            // Capture path prefers OpenCV's native warpPerspective when the
+            // native library is loaded; it returns null otherwise so the
+            // deterministic DLT implementation below stays the fallback (and
+            // the only path exercised by JVM/Robolectric tests).
+            if (OpenCvVision.isAvailable()) {
+                val cv = try {
+                    OpenCvVision.warpQuad(bitmap, srcPts, outW, outH)
+                } catch (t: Throwable) {
+                    null
+                }
+                if (cv != null) return cv
+            }
+
             // Forward homography src->dst; warp uses its inverse.
             val h = computeHomography(srcPts, dstPts)
                 ?: throw InvalidQuadException("Homography estimation failed for given quad")
