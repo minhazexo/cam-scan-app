@@ -65,7 +65,11 @@ object DocumentEnhancer {
         val bp2 = 20f
         val saturate = 1.25f
 
-        val kSize = (min(width, height) / 8).coerceIn(21, 101) or 1
+        // Background-estimation window for the high-pass flatten step. A WIDER
+        // window (was /8) is required to remove broad, uneven lighting - dark
+        // bands/shadows across a page - instead of only small brightness drift.
+        // Text is high-frequency, so it survives the flattening intact.
+        val kSize = (min(width, height) / 4).coerceIn(31, 201) or 1
         val blurR = kSize / 2
 
         // Process in horizontal bands. A full-page A4 (2480x3508) is 8.7M

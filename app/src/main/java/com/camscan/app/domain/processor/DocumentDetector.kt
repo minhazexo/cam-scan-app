@@ -139,6 +139,10 @@ object DocumentDetector {
             // candidate search; it is used as a fallback so a clean page whose
             // text-block contours produce only weak quads is still recognised.
             val isDigital = isDigitalPage(gray, sampleW, sampleH)
+            // A page-like surface that fills the frame (dark/low-contrast page
+            // photos) has no page-vs-background boundary to find, so it is
+            // recognised independently and used as its own document quad.
+            val isFlat = isFlatPage(gray, sampleW, sampleH)
 
             // Capture path (fast=false) prefers OpenCV for edge extraction.
             // It is optional: on JVM/Robolectric (and any device where the
@@ -182,6 +186,9 @@ object DocumentDetector {
                         digitalPage = true
                     )
                 }
+                if (isFlat) {
+                    return flatPageResult(stats, emptyList(), 0.6f)
+                }
                 stats.confidence = "LOW"
                 lastStats = stats
                 return DetectionResult(
@@ -221,6 +228,9 @@ object DocumentDetector {
                         cp, DetectionConfidence.MEDIUM, first.score, ranked,
                         "page fills the frame; confirm the corners", digitalPage = false
                     )
+                }
+                if (isFlat) {
+                    return flatPageResult(stats, ranked, first.score)
                 }
                 stats.confidence = "LOW"
                 lastStats = stats
@@ -282,6 +292,9 @@ object DocumentDetector {
                         "digital page identified; page canvas used as document",
                         digitalPage = true
                     )
+                }
+                if (isFlat) {
+                    return flatPageResult(stats, pool, best.score)
                 }
                 return DetectionResult(
                     null, DetectionConfidence.LOW, best.score, pool,
@@ -1615,6 +1628,88 @@ object DocumentDetector {
         return true
     }
 
+    /**
+     * True when the whole frame is a page-like surface carrying text (a "flat
+     * page" photo) rather than a scene. Used as a fallback so a dark,
+     * low-contrast photo of a page that FILLS THE FRAME can still be scanned
+     * automatically. It deliberately does NOT depend on absolute brightness,
+     * so underexposed page photos qualify.
+     *
+     * Conservative on purpose: requires many scattered small ink strokes over a
+     * wide area with paper dominating; a scene, a wall or a logo fails.
+     */
+    private fun isFlatPage(gray: FloatArray, w: Int, h: Int): Boolean {
+        if (w < 48 || h < 48) return false
+        val n = w * h
+        val mean = localMeanIntegral(gray, w, h, 31)
+        // Margin comfortably above typical sensor grain (~10) so speckle is
+        // not mistaken for text, but far below real page text contrast.
+        val ink = ByteArray(n)
+        var inkCount = 0
+        for (i in 0 until n) {
+            if (gray[i] < mean[i] - 15f) {
+                ink[i] = 1
+                inkCount++
+            }
+        }
+        val inkRatio = inkCount.toDouble() / n
+        // A page has some ink but paper dominates; a dark blob or a photo fails.
+        if (inkRatio < 0.03 || inkRatio > 0.40) return false
+
+        // Text => many SMALL ink strokes; a scene/logo/photo => few large blobs.
+        val label = IntArray(n) { -1 }
+        var small = 0
+        var large = 0
+        var minX = w
+        var maxX = -1
+        var minY = h
+        var maxY = -1
+        var comp = 0
+        for (seed in 0 until n) {
+            if (ink[seed] == 0.toByte() || label[seed] != -1) continue
+            val stack = ArrayDeque<Int>()
+            stack.add(seed)
+            label[seed] = comp
+            var size = 0
+            while (stack.isNotEmpty()) {
+                val idx = stack.removeLast()
+                size++
+                val x = idx % w
+                val y = idx / w
+                if (x < minX) minX = x
+                if (x > maxX) maxX = x
+                if (y < minY) minY = y
+                if (y > maxY) maxY = y
+                for (dy in -1..1) {
+                    for (dx in -1..1) {
+                        if (dx == 0 && dy == 0) continue
+                        val nx = x + dx
+                        val ny = y + dy
+                        if (nx in 0 until w && ny in 0 until h) {
+                            val ni = ny * w + nx
+                            if (ink[ni] != 0.toByte() && label[ni] == -1) {
+                                label[ni] = comp
+                                stack.add(ni)
+                            }
+                        }
+                    }
+                }
+            }
+            comp++
+            // Ignore 1-3px specks (sensor grain): real text strokes are larger.
+            when {
+                size < 4 -> {}
+                size <= 400 -> small++
+                else -> large++
+            }
+        }
+        if (small < 30 || large > small) return false
+        // Ink must be spread across the frame (a page of text), not one corner.
+        val spanX = (maxX - minX).toFloat() / w
+        val spanY = (maxY - minY).toFloat() / h
+        return spanX >= 0.65f && spanY >= 0.65f
+    }
+
     // ------------------------------------------------------------------
     // Small helpers
     // ------------------------------------------------------------------
@@ -1622,6 +1717,31 @@ object DocumentDetector {
     private fun clampToImage(c: CornerPoints, w: Float, h: Float): CornerPoints {
         fun cl(p: PointF) = PointF(p.x.coerceIn(0f, w - 1f), p.y.coerceIn(0f, h - 1f))
         return CornerPoints(cl(c.topLeft), cl(c.topRight), cl(c.bottomRight), cl(c.bottomLeft))
+    }
+
+    /**
+     * Result for a recognised flat page photo: the full frame (minus a hairline
+     * inset so the quad passes area validation) is the document. HIGH so it
+     * auto-processes; [DetectionResult.flatPage] records why.
+     */
+    private fun flatPageResult(
+        stats: DetectionStats,
+        pool: List<ScoredQuad>,
+        score: Float
+    ): DetectionResult {
+        val page = CornerPoints(
+            PointF(0.01f, 0.01f), PointF(0.99f, 0.01f),
+            PointF(0.99f, 0.99f), PointF(0.01f, 0.99f)
+        )
+        stats.confidence = "HIGH"
+        stats.selectedScore = score
+        stats.selectedCorners = page.toList()
+        lastStats = stats
+        return DetectionResult(
+            page, DetectionConfidence.HIGH, score, pool,
+            "flat page photo detected; full frame used as the document",
+            flatPage = true
+        )
     }
 
     // ------------------------------------------------------------------

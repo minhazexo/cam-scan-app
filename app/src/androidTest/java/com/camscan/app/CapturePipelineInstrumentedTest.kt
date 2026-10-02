@@ -2,8 +2,10 @@ package com.camscan.app
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.PointF
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.camscan.app.domain.model.CornerPoints
 import com.camscan.app.domain.processor.DocumentDetector
 import com.camscan.app.domain.processor.DocumentProcessor
 import org.junit.Assert.assertTrue
@@ -75,6 +77,25 @@ class CapturePipelineInstrumentedTest {
                     )
                 } catch (e: Exception) {
                     report.append("  process failed: ${e.javaClass.simpleName}: ${e.message}\n")
+                }
+            } else {
+                // Detection declined (dark / full-frame page). Force a
+                // full-frame quad so we can see what the enhancement stage
+                // would produce for a flat page photo.
+                try {
+                    val full = CornerPoints(
+                        PointF(0.02f, 0.02f), PointF(0.98f, 0.02f),
+                        PointF(0.98f, 0.98f), PointF(0.02f, 0.98f)
+                    )
+                    val res = DocumentProcessor.processImageStrict(bmp, corners = full)
+                    writeJpeg(res.a4, File(outDir, "forced_a4_$i.jpg"))
+                    writeJpeg(res.documentOnly, File(outDir, "forced_doc_$i.jpg"))
+                    report.append(
+                        "  FORCED full-frame a4=${res.a4.width}x${res.a4.height} " +
+                            "doc=${res.documentOnly.width}x${res.documentOnly.height} conf=${res.confidence}\n"
+                    )
+                } catch (e: Exception) {
+                    report.append("  forced scan failed: ${e.javaClass.simpleName}: ${e.message}\n")
                 }
             }
             bmp.recycle()

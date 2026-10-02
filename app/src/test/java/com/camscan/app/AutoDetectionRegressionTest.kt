@@ -562,4 +562,51 @@ class AutoDetectionRegressionTest {
         )
         photo.recycle()
     }
+
+    /**
+     * A dark, low-contrast, full-frame page: mid-gray paper covered with small
+     * dark text-like strokes, no page-vs-background boundary.
+     */
+    private fun renderDarkFlatPage(w: Int, h: Int, seed: Long = 9L): Bitmap {
+        val rnd = Random(seed)
+        val px = IntArray(w * h)
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val base = 116 + ((y.toFloat() / h) * 32).toInt()
+                val v = (base + rnd.nextInt(9) - 4).coerceIn(0, 255)
+                px[y * w + x] = Color.rgb(v, v, v)
+            }
+        }
+        for (row in 0 until 30) {
+            val y0 = (h * 0.07f + row * (h * 0.028f)).toInt()
+            if (y0 !in 0 until h) continue
+            val x0 = (w * 0.10f).toInt()
+            val x1 = (w * 0.90f).toInt()
+            val gap = (w * 0.02f).toInt().coerceAtLeast(2)
+            var x = x0
+            while (x < x1) {
+                val len = (w * 0.04f).toInt().coerceAtLeast(3)
+                for (xx in x until min(x + len, w)) {
+                    for (yy in y0 until min(y0 + 3, h)) px[yy * w + xx] = Color.rgb(84, 84, 84)
+                }
+                x += len + gap
+            }
+        }
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        bmp.setPixels(px, 0, w, 0, 0, w, h)
+        return bmp
+    }
+
+    @Test
+    fun darkFullFramePage_autoAccepted() {
+        val photo = renderDarkFlatPage(520, 700)
+        val result = DocumentDetector.detectDocument(photo, fast = false)
+        assertTrue(
+            "dark full-frame page must auto-process (${result.confidence}: ${result.reason})",
+            !result.blocksAutoProcessing
+        )
+        assertEquals("${result.reason}", DetectionConfidence.HIGH, result.confidence)
+        assertNotNull("auto scan must yield corners", result.corners)
+        photo.recycle()
+    }
 }

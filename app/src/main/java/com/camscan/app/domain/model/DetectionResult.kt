@@ -107,7 +107,13 @@ data class DetectionResult(
     val score: Float,
     val allCandidates: List<ScoredQuad> = emptyList(),
     val reason: String = "",
-    val digitalPage: Boolean = false
+    val digitalPage: Boolean = false,
+    /**
+     * True when the input is a page-like surface that fills the frame (a flat
+     * page photo), accepted via the flat-page fallback rather than a detected
+     * page-vs-background boundary. Such a result is a normal HIGH auto-scan.
+     */
+    val flatPage: Boolean = false
 ) {
     /** Workflow action for this result. */
     val action: DetectionAction

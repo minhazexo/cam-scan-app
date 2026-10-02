@@ -52,6 +52,17 @@ object DocumentProcessor {
     /** Upper bound on enlargement when fitting an extraction onto A4. */
     const val MAX_UPSCALE = 2.5f
 
+    /**
+     * Enlargement cap applied when the extraction is already reasonably large
+     * (>= [MIN_FILL_SOURCE_PX] on its short side). A normal phone photo is
+     * then scaled up to fill the sheet, matching how scanners output a full
+     * page, instead of being letterboxed into the middle of the A4 canvas.
+     */
+    const val MAX_UPSCALE_FILL = 6f
+
+    /** Short-side size at or above which filling the sheet is safe. */
+    const val MIN_FILL_SOURCE_PX = 400
+
     // ------------------------------------------------------------------
     // Strict pipeline (the only path used for final output)
     // ------------------------------------------------------------------
@@ -238,11 +249,14 @@ object DocumentProcessor {
 
         val maxW = canvasW * 0.94f
         val maxH = canvasH * 0.94f
-        // Cap upscaling: a small extraction blown up to full A4 is pure
-        // interpolation noise. Never scale beyond MAX_UPSCALE.
+        // Enlargement cap. A TINY extraction blown up to full A4 is pure
+        // interpolation noise, so it stays capped; a normal-size photo is
+        // allowed to fill the sheet (scanner-like output) instead of being
+        // letterboxed with wide white margins.
+        val cap = if (min(srcW, srcH) >= MIN_FILL_SOURCE_PX) MAX_UPSCALE_FILL else MAX_UPSCALE
         val scale = min(
             min(maxW / srcW.toFloat(), maxH / srcH.toFloat()),
-            MAX_UPSCALE
+            cap
         )
         val scaledW = (srcW * scale).toInt().coerceAtLeast(1)
         val scaledH = (srcH * scale).toInt().coerceAtLeast(1)
