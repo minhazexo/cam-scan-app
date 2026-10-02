@@ -138,18 +138,49 @@ class DocumentDetailViewModel(private val repository: DocumentRepository) : View
         }
     }
 
-    fun exportPdf(context: Context, onComplete: (Uri?) -> Unit) {
+    /**
+     * Exports the document to a media folder.
+     *
+     * Two guards, because an uncaught exception in a coroutine silently kills
+     * the process:
+     *  - pages still pending corner correction are raw renders, not scans;
+     *  - the MediaStore write can fail, so it is reported instead of thrown.
+     */
+    fun exportPdf(context: Context, onComplete: (Uri?, String?) -> Unit) {
         viewModelScope.launch(Dispatchers.IO) {
             val doc = document.value ?: return@launch
-            val app = context.applicationContext as CamScanApplication
-            val pagePaths = pages.value.map { it.processedImagePath }
+            val currentPages = pages.value
+            val pending = currentPages.count { it.needsManualCorrection }
+            if (pending > 0) {
+                withContext(Dispatchers.Main) {
+                    onComplete(
+                        null,
+                        "Please correct $pending page${if (pending == 1) "" else "s"} before exporting"
+                    )
+                }
+                return@launch
+            }
+            try {
+                val app = context.applicationContext as CamScanApplication
+                val pagePaths = currentPages.map { it.processedImagePath }
 
-            val pdfFile = File(context.cacheDir, "${doc.title}.pdf")
-            PdfGenerator.generatePdf(context, pagePaths, pdfFile)
-            val exported = app.storageManager.exportScannedPdfToDedicatedFolder(pdfFile, doc.title)
-
-            withContext(Dispatchers.Main) {
-                onComplete(exported)
+                val pdfFile = File(context.cacheDir, "${doc.title}.pdf")
+                PdfGenerator.generatePdf(context, pagePaths, pdfFile)
+                val exported = app.storageManager.exportScannedPdfToDedicatedFolder(pdfFile, doc.title)
+                if (exported == null) {
+                    withContext(Dispatchers.Main) {
+                        onComplete(null, "Could not save the PDF. Please try again.")
+                    }
+                } else {
+                    withContext(Dispatchers.Main) {
+                        onComplete(exported, null)
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                withContext(Dispatchers.Main) {
+                    onComplete(null, "Export failed: ${e.message ?: "unknown error"}")
+                }
             }
         }
     }

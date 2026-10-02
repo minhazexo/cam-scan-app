@@ -214,12 +214,25 @@ class HomeViewModel(private val repository: DocumentRepository) : ViewModel() {
 
             val paths = pages.map { it.processedImagePath }
 
-            val pdfFile = File(context.cacheDir, "${document.title}.pdf")
-            PdfGenerator.generatePdf(context, paths, pdfFile)
-            val exportedUri = app.storageManager.exportScannedPdfToDedicatedFolder(pdfFile, document.title)
+            // Generation and the MediaStore write can fail; an uncaught
+            // exception in a coroutine would kill the process.
+            try {
+                val pdfFile = File(context.cacheDir, "${document.title}.pdf")
+                PdfGenerator.generatePdf(context, paths, pdfFile)
+                val exportedUri = app.storageManager.exportScannedPdfToDedicatedFolder(pdfFile, document.title)
 
-            withContext(Dispatchers.Main) {
-                onComplete(exportedUri, null)
+                withContext(Dispatchers.Main) {
+                    if (exportedUri != null) {
+                        onComplete(exportedUri, null)
+                    } else {
+                        onComplete(null, "Could not save the PDF. Please try again.")
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                withContext(Dispatchers.Main) {
+                    onComplete(null, "Export failed: ${e.message ?: "unknown error"}")
+                }
             }
         }
     }

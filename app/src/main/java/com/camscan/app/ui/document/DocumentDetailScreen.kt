@@ -146,9 +146,11 @@ fun DocumentDetailScreen(
                         Icon(Icons.Default.TextFields, contentDescription = "OCR All Pages")
                     }
                     IconButton(onClick = {
-                        viewModel.exportPdf(context) { uri ->
+                        viewModel.exportPdf(context) { uri, error ->
                             if (uri != null) {
                                 Toast.makeText(context, "Exported PDF to Downloads", Toast.LENGTH_SHORT).show()
+                            } else if (error != null) {
+                                Toast.makeText(context, error, Toast.LENGTH_LONG).show()
                             }
                         }
                     }) {

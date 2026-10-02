@@ -60,62 +60,83 @@ object DocumentEnhancer {
      * 5. Color saturation boost (1.25x)
      */
     private fun enhanceGcmode(pixels: IntArray, width: Int, height: Int) {
-        val size = pixels.size
-        val r = FloatArray(size)
-        val g = FloatArray(size)
-        val b = FloatArray(size)
-
-        for (i in 0 until size) {
-            val c = pixels[i]
-            r[i] = ((c shr 16) and 0xFF).toFloat()
-            g[i] = ((c shr 8) and 0xFF).toFloat()
-            b[i] = (c and 0xFF).toFloat()
-        }
-
-        // Fast Box Blur for background estimation
-        val minDim = min(width, height)
-        val kSize = (minDim / 8).coerceIn(21, 101) or 1
-        val blurR = FloatArray(size)
-        val blurG = FloatArray(size)
-        val blurB = FloatArray(size)
-
-        boxBlurChannel(r, blurR, width, height, kSize)
-        boxBlurChannel(g, blurG, width, height, kSize)
-        boxBlurChannel(b, blurB, width, height, kSize)
-
         val wp = 127f
         val bp = 66f
         val bp2 = 20f
         val saturate = 1.25f
 
-        for (i in 0 until size) {
-            // High Pass Flatten: img - bg + 127
-            var fr = r[i] - blurR[i] + 127f
-            var fg = g[i] - blurG[i] + 127f
-            var fb = b[i] - blurB[i] + 127f
+        val kSize = (min(width, height) / 8).coerceIn(21, 101) or 1
+        val blurR = kSize / 2
 
-            // Color saturation boost around mean luminance
-            val lum = (fr + fg + fb) / 3f
-            fr = lum + (fr - lum) * saturate
-            fg = lum + (fg - lum) * saturate
-            fb = lum + (fb - lum) * saturate
+        // Process in horizontal bands. A full-page A4 (2480x3508) is 8.7M
+        // pixels; allocating whole-image FloatArrays for the 3 channels plus
+        // their blurs needs >200MB and crashes the app with an
+        // OutOfMemoryError. Bands bound the working set to a few MB while
+        // producing identical output: the vertical blur pass only needs
+        // `blurR` neighbouring rows, which each band includes as context.
+        val bandRows = 128
+        for (bandStart in 0 until height step bandRows) {
+            val bandEnd = minOf(bandStart + bandRows, height)
+            val ctxStart = maxOf(0, bandStart - blurR)
+            val ctxEnd = minOf(height, bandEnd + blurR)
+            val regionRows = ctxEnd - ctxStart
+            val regionSize = regionRows * width
 
-            // White point stretch [0, wp] -> [0, 255]
-            fr = (min(fr, wp) * (255f / wp)).coerceIn(0f, 255f)
-            fg = (min(fg, wp) * (255f / wp)).coerceIn(0f, 255f)
-            fb = (min(fb, wp) * (255f / wp)).coerceIn(0f, 255f)
+            val r = FloatArray(regionSize)
+            val g = FloatArray(regionSize)
+            val b = FloatArray(regionSize)
+            for (ry in 0 until regionRows) {
+                val srcRow = (ctxStart + ry) * width
+                val dstRow = ry * width
+                for (x in 0 until width) {
+                    val c = pixels[srcRow + x]
+                    r[dstRow + x] = ((c shr 16) and 0xFF).toFloat()
+                    g[dstRow + x] = ((c shr 8) and 0xFF).toFloat()
+                    b[dstRow + x] = (c and 0xFF).toFloat()
+                }
+            }
 
-            // Black point stretch 1 (bp = 66)
-            fr = ((fr - bp) * (255f / (255f - bp))).coerceIn(0f, 255f)
-            fg = ((fg - bp) * (255f / (255f - bp))).coerceIn(0f, 255f)
-            fb = ((fb - bp) * (255f / (255f - bp))).coerceIn(0f, 255f)
+            val blurR2 = FloatArray(regionSize)
+            val blurG = FloatArray(regionSize)
+            val blurB = FloatArray(regionSize)
+            boxBlurChannel(r, blurR2, width, regionRows, kSize)
+            boxBlurChannel(g, blurG, width, regionRows, kSize)
+            boxBlurChannel(b, blurB, width, regionRows, kSize)
 
-            // Black point stretch 2 (bp2 = 20)
-            fr = ((fr - bp2) * (255f / (255f - bp2))).coerceIn(0f, 255f)
-            fg = ((fg - bp2) * (255f / (255f - bp2))).coerceIn(0f, 255f)
-            fb = ((fb - bp2) * (255f / (255f - bp2))).coerceIn(0f, 255f)
+            // Apply the transfer curve only to the band's own rows.
+            for (y in bandStart until bandEnd) {
+                val off = (y - ctxStart) * width
+                val dstOff = y * width
+                for (x in 0 until width) {
+                    // High Pass Flatten: img - bg + 127
+                    var fr = r[off + x] - blurR2[off + x] + 127f
+                    var fg = g[off + x] - blurG[off + x] + 127f
+                    var fb = b[off + x] - blurB[off + x] + 127f
 
-            pixels[i] = Color.rgb(fr.toInt(), fg.toInt(), fb.toInt())
+                    // Color saturation boost around mean luminance
+                    val lum = (fr + fg + fb) / 3f
+                    fr = lum + (fr - lum) * saturate
+                    fg = lum + (fg - lum) * saturate
+                    fb = lum + (fb - lum) * saturate
+
+                    // White point stretch [0, wp] -> [0, 255]
+                    fr = (min(fr, wp) * (255f / wp)).coerceIn(0f, 255f)
+                    fg = (min(fg, wp) * (255f / wp)).coerceIn(0f, 255f)
+                    fb = (min(fb, wp) * (255f / wp)).coerceIn(0f, 255f)
+
+                    // Black point stretch 1 (bp = 66)
+                    fr = ((fr - bp) * (255f / (255f - bp))).coerceIn(0f, 255f)
+                    fg = ((fg - bp) * (255f / (255f - bp))).coerceIn(0f, 255f)
+                    fb = ((fb - bp) * (255f / (255f - bp))).coerceIn(0f, 255f)
+
+                    // Black point stretch 2 (bp2 = 20)
+                    fr = ((fr - bp2) * (255f / (255f - bp2))).coerceIn(0f, 255f)
+                    fg = ((fg - bp2) * (255f / (255f - bp2))).coerceIn(0f, 255f)
+                    fb = ((fb - bp2) * (255f / (255f - bp2))).coerceIn(0f, 255f)
+
+                    pixels[dstOff + x] = Color.rgb(fr.toInt(), fg.toInt(), fb.toInt())
+                }
+            }
         }
     }
 

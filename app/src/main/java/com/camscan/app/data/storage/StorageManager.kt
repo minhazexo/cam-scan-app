@@ -132,27 +132,49 @@ class StorageManager(private val context: Context) {
         return folder.listFiles { file -> file.isFile && file.extension.equals("pdf", true) }?.toList() ?: emptyList()
     }
 
+    /**
+     * Exports [pdfFile] into a user-visible media folder.
+     *
+     * MediaStore enforces which RELATIVE_PATH values are legal per collection:
+     * `MediaStore.Downloads` only accepts `Download/...`, so writing a
+     * `Documents/...` path into it throws IllegalArgumentException. Each
+     * collection therefore gets its own matching relative path:
+     *   Downloads -> Download/CamScan/ScannedPDFs
+     *   Documents -> Documents/CamScan/ScannedPDFs
+     */
     fun exportScannedPdfToDedicatedFolder(pdfFile: File, title: String): Uri? {
         val sanitizedTitle = title.replace("[^a-zA-Z0-9._-]".toRegex(), "_")
         val displayName = if (sanitizedTitle.endsWith(".pdf", true)) sanitizedTitle else "$sanitizedTitle.pdf"
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val contentValues = ContentValues().apply {
-                put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
-                put(MediaStore.MediaColumns.MIME_TYPE, "application/pdf")
-                put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOCUMENTS + "/CamScan/ScannedPDFs")
-            }
             val resolver = context.contentResolver
-            val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, contentValues)
-                ?: resolver.insert(MediaStore.Files.getContentUri("external"), contentValues)
+            val leaf = "CamScan/ScannedPDFs"
 
-            if (uri != null) {
-                resolver.openOutputStream(uri)?.use { out ->
-                    pdfFile.inputStream().use { input ->
-                        input.copyTo(out)
+            // Try the dedicated Documents collection first, then Downloads.
+            val attempts = listOf(
+                MediaStore.Files.getContentUri("external") to
+                    (Environment.DIRECTORY_DOCUMENTS + "/" + leaf),
+                MediaStore.Downloads.EXTERNAL_CONTENT_URI to
+                    (Environment.DIRECTORY_DOWNLOADS + "/" + leaf)
+            )
+
+            for ((collection, relativePath) in attempts) {
+                try {
+                    val contentValues = ContentValues().apply {
+                        put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+                        put(MediaStore.MediaColumns.MIME_TYPE, "application/pdf")
+                        put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
                     }
+                    val uri = resolver.insert(collection, contentValues) ?: continue
+                    resolver.openOutputStream(uri)?.use { out ->
+                        pdfFile.inputStream().use { input -> input.copyTo(out) }
+                    }
+                    return uri
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    // IllegalArgumentException for a disallowed RELATIVE_PATH:
+                    // fall through and try the next collection.
                 }
-                return uri
             }
         } else {
             val targetDir = getScannedPdfFolder()
@@ -160,7 +182,7 @@ class StorageManager(private val context: Context) {
             pdfFile.copyTo(targetFile, overwrite = true)
             return Uri.fromFile(targetFile)
         }
-        return exportPdfToPublicStorage(pdfFile, title)
+        return null
     }
 
     fun exportPdfToPublicStorage(pdfFile: File, title: String): Uri? {
