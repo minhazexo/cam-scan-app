@@ -7,6 +7,7 @@ import com.camscan.app.domain.model.DetectionConfidence
 import com.camscan.app.domain.model.DetectionResult
 import com.camscan.app.domain.model.ScoredQuad
 import kotlin.math.abs
+import kotlin.math.atan2
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
@@ -119,20 +120,26 @@ object DocumentDetector {
                 .take(12)
 
             if (ranked.isEmpty()) {
-                // Clean-page exception: uniform border means the sensor frame
-                // plausibly IS the page (digital PDF render / flatbed input).
-                val uniform = isUniformBorder(gray, sampleW, sampleH)
-                if (uniform) {
-                    val inset = CornerPoints(
-                        PointF(0.015f, 0.015f), PointF(0.985f, 0.015f),
-                        PointF(0.985f, 0.985f), PointF(0.015f, 0.985f)
+                // No quad survived. A white page on a white table produces no
+                // edge evidence, and inventing a generic inset would silently
+                // include background. Only a POSITIVELY identified digital
+                // page may act as its own document quad; everything else goes
+                // to the corner editor.
+                if (isDigitalPage(gray, sampleW, sampleH)) {
+                    val page = CornerPoints(
+                        PointF(0f, 0f), PointF(1f, 0f),
+                        PointF(1f, 1f), PointF(0f, 1f)
                     )
                     return DetectionResult(
-                        inset, DetectionConfidence.MEDIUM, 0.5f, emptyList(),
-                        "uniform page background; confirm corners"
+                        page, DetectionConfidence.HIGH, 0.6f, emptyList(),
+                        "digital page identified; page canvas used as document",
+                        digitalPage = true
                     )
                 }
-                return DetectionResult(null, DetectionConfidence.LOW, 0f, emptyList(), "no quadrilateral found; manual corners required")
+                return DetectionResult(
+                    null, DetectionConfidence.LOW, 0f, emptyList(),
+                    "no quadrilateral found; manual corners required"
+                )
             }
 
             // Camera-frame exclusion: drop full-frame / near-frame quads with
@@ -154,11 +161,23 @@ object DocumentDetector {
                 // page — accept it with a confirmation hint.
                 val cp = ranked.first().toCornerPoints(sampleW.toFloat(), sampleH.toFloat())
                     .let { denorm(it, sampleW.toFloat(), sampleH.toFloat()) }
-                if (isUniformBorder(gray, sampleW, sampleH) &&
-                    (QuadValidator.isFullFrame(cp, sampleW.toFloat(), sampleH.toFloat()) ||
-                        QuadValidator.isNearFrame(cp, sampleW.toFloat(), sampleH.toFloat()))) {
-                    return DetectionResult(cp, DetectionConfidence.MEDIUM, ranked.first().score, ranked,
-                        "near/full frame on uniform background; confirm corners")
+                val nearFrame = QuadValidator.isFullFrame(cp, sampleW.toFloat(), sampleH.toFloat()) ||
+                    QuadValidator.isNearFrame(cp, sampleW.toFloat(), sampleH.toFloat())
+                // A full/near-full frame quad is only acceptable as an automatic
+                // document when the input was POSITIVELY identified as a
+                // born-digital page. For a photograph the frame is the camera,
+                // not the page, so this must require user confirmation.
+                if (nearFrame && isDigitalPage(gray, sampleW, sampleH)) {
+                    return DetectionResult(
+                        cp, DetectionConfidence.HIGH, ranked.first().score, ranked,
+                        "digital page identified; page canvas used as document", digitalPage = true
+                    )
+                }
+                if (nearFrame && isUniformBorder(gray, sampleW, sampleH)) {
+                    return DetectionResult(
+                        cp, DetectionConfidence.MEDIUM, ranked.first().score, ranked,
+                        "page fills the frame; confirm the corners", digitalPage = false
+                    )
                 }
                 return DetectionResult(
                     null, DetectionConfidence.LOW, ranked.first().score, ranked,
@@ -738,9 +757,30 @@ object DocumentDetector {
         // edge. Text lines and texture quads score ~0 here.
         val polarity = QuadValidator.boundaryPolarity(quad, gray, w, h)
 
-        val total = (0.16f * areaScore + 0.10f * rectangularity + 0.24f * edgeSupport +
-            0.12f * angleScore + 0.08f * aspectScore + 0.08f * borderScore +
-            0.22f * polarity)
+        // --- Additional independent signals (document vs background) ---
+
+        // Parallel edge consistency: opposite sides of a real page converge
+        // only slightly; a random rectangle or a table edge does not.
+        val parallel = parallelEdgeConsistency(quad)
+
+        // Inside/outside contrast: mean luminance inside vs outside the quad.
+        val contrast = insideOutsideContrast(quad, gray, w, h)
+
+        // Local texture difference: paper is smoother than the scene around
+        // it, but a document cover / laptop lid is smooth on both sides.
+        val texture = textureDifference(quad, gray, w, h)
+
+        // Boundary continuity: edge support measured with fewer samples is
+        // less noisy; agreement between the two passes implies a real,
+        // continuous boundary rather than scattered texture.
+        val continuity = (edgeSupport * 0.6f +
+            QuadValidator.edgeSupport(quad, dilated, w, h, samplesPerEdge = 24) * 0.4f)
+            .coerceIn(0f, 1f)
+
+        val total = (0.10f * areaScore + 0.07f * rectangularity + 0.17f * edgeSupport +
+            0.08f * angleScore + 0.06f * aspectScore + 0.07f * borderScore +
+            0.16f * polarity + 0.08f * parallel + 0.09f * contrast +
+            0.06f * texture + 0.06f * continuity)
             .coerceIn(0f, 1f)
 
         return ScoredQuad(
@@ -753,8 +793,135 @@ object DocumentDetector {
             aspectScore = aspectScore,
             borderScore = borderScore,
             polarityScore = polarity,
+            parallelScore = parallel,
+            contrastScore = contrast,
+            textureScore = texture,
+            continuityScore = continuity,
             areaFraction = areaFrac
         )
+    }
+
+    /**
+     * Opposite edges of a real page are near-parallel even under perspective
+     * (they converge toward a vanishing point, not wildly). Measures the mean
+     * angular deviation of the two opposite-edge pairs from parallel.
+     */
+    private fun parallelEdgeConsistency(quad: List<PointF>): Float {
+        fun angle(e0: Int): Double {
+            val a = quad[e0]
+            val b = quad[(e0 + 1) % 4]
+            return atan2((b.y - a.y).toDouble(), (b.x - a.x).toDouble())
+        }
+        // Unwrap so differences are meaningful across the +/-pi seam.
+        fun delta(a: Double, b: Double): Double {
+            var d = abs(a - b)
+            while (d > Math.PI / 2) d = Math.PI - d
+            return d
+        }
+        val d1 = delta(angle(0), angle(2))
+        val d2 = delta(angle(1), angle(3))
+        val mean = ((d1 + d2) / 2.0).toFloat()
+        return (1f - mean / 0.45f).coerceIn(0f, 1f)
+    }
+
+    /**
+     * Mean luminance just inside vs just outside each edge, normalised. A real
+     * page has a consistent step; a hallucinated quad straddles one region.
+     */
+    private fun insideOutsideContrast(quad: List<PointF>, gray: FloatArray, w: Int, h: Int): Float {
+        if (gray.size != w * h) return 0f
+        var sum = 0f
+        var n = 0
+        val d = 9f
+        for (e in 0 until 4) {
+            val a = quad[e]
+            val b = quad[(e + 1) % 4]
+            val ex = b.x - a.x
+            val ey = b.y - a.y
+            val len = hypot(ex.toDouble(), ey.toDouble()).toFloat()
+            if (len < 1e-6f) continue
+            var nx = -ey / len
+            var ny = ex / len
+            val mx = (a.x + b.x) / 2f
+            val my = (a.y + b.y) / 2f
+            val cx = (quad[0].x + quad[1].x + quad[2].x + quad[3].x) / 4f
+            val cy = (quad[0].y + quad[1].y + quad[2].y + quad[3].y) / 4f
+            if ((mx + nx - cx) * (mx - cx) + (my + ny - cy) * (my - cy) < 0) {
+                nx = -nx
+                ny = -ny
+            }
+            val steps = 20
+            for (s in 0 until steps) {
+                val t = s.toFloat() / (steps - 1)
+                val sx = a.x + ex * t
+                val sy = a.y + ey * t
+                val ix = (sx - nx * d).toInt()
+                val iy = (sy - ny * d).toInt()
+                val ox = (sx + nx * d).toInt()
+                val oy = (sy + ny * d).toInt()
+                if (ix !in 0 until w || iy !in 0 until h || ox !in 0 until w || oy !in 0 until h) continue
+                val diff = abs(gray[iy * w + ix] - gray[oy * w + ox])
+                sum += min(diff, 60f)
+                n++
+            }
+        }
+        if (n == 0) return 0f
+        return (sum / n / 45f).coerceIn(0f, 1f)
+    }
+
+    /**
+     * Texture (local gradient energy) inside the quad vs a ring just outside.
+     * Paper is markedly smoother than the scene it lies on.
+     */
+    private fun textureDifference(quad: List<PointF>, gray: FloatArray, w: Int, h: Int): Float {
+        if (gray.size != w * h) return 0f
+        fun energy(x: Int, y: Int): Float {
+            if (x < 1 || y < 1 || x >= w - 1 || y >= h - 1) return 0f
+            val i = y * w + x
+            val gx = gray[i + 1] - gray[i - 1]
+            val gy = gray[i + w] - gray[i - w]
+            return hypot(gx.toDouble(), gy.toDouble()).toFloat()
+        }
+        var inSum = 0f
+        var outSum = 0f
+        var n = 0
+        val cx = (quad[0].x + quad[1].x + quad[2].x + quad[3].x) / 4f
+        val cy = (quad[0].y + quad[1].y + quad[2].y + quad[3].y) / 4f
+        for (e in 0 until 4) {
+            val a = quad[e]
+            val b = quad[(e + 1) % 4]
+            val ex = b.x - a.x
+            val ey = b.y - a.y
+            val len = hypot(ex.toDouble(), ey.toDouble()).toFloat()
+            if (len < 1e-6f) continue
+            var nx = -ey / len
+            var ny = ex / len
+            val mx = (a.x + b.x) / 2f
+            val my = (a.y + b.y) / 2f
+            if ((mx + nx - cx) * (mx - cx) + (my + ny - cy) * (my - cy) < 0) {
+                nx = -nx
+                ny = -ny
+            }
+            val steps = 20
+            for (s in 0 until steps) {
+                val t = s.toFloat() / (steps - 1)
+                val sx = a.x + ex * t
+                val sy = a.y + ey * t
+                // Pull slightly inward from the boundary.
+                val ix = (sx - nx * 5f).toInt()
+                val iy = (sy - ny * 5f).toInt()
+                val ox = (sx + nx * 14f).toInt()
+                val oy = (sy + ny * 14f).toInt()
+                if (ix !in 0 until w || iy !in 0 until h) continue
+                inSum += energy(ix, iy)
+                n++
+                if (ox in 0 until w && oy in 0 until h) outSum += energy(ox, oy)
+            }
+        }
+        if (n == 0 || outSum <= 1e-3f) return 0f
+        val ratio = inSum / (outSum / n)
+        // ratio < 1 means the interior is smoother than the surround (paper).
+        return ((1f - ratio) / 0.6f).coerceIn(0f, 1f)
     }
 
     private fun interiorAngle(a: PointF, b: PointF, c: PointF): Double {
@@ -773,16 +940,46 @@ object DocumentDetector {
         val second = pool.getOrNull(1)?.score ?: 0f
         val margin = best.score - second
         val inArea = best.areaFraction in 0.06f..0.94f
-        // Edge support is the primary geometric evidence that a quad is a
-        // REAL page boundary rather than a texture hallucination; polarity
-        // is the primary photometric evidence (paper-vs-scene step).
-        // Quads weak on either can never be HIGH or MEDIUM.
+
+        // Hard gates. Edge support is the primary geometric evidence that a
+        // quad is a REAL page boundary; polarity is the primary photometric
+        // evidence (paper-vs-scene step). Without both, the quad is a
+        // hallucination and the user must place the corners.
         if (best.edgeSupportScore < 0.30f) return DetectionConfidence.LOW
         if (best.polarityScore < 0.35f) return DetectionConfidence.LOW
+        // A quad covering essentially the whole frame is the camera frame, not
+        // a page, unless the caller independently established a digital page.
+        if (best.areaFraction > 0.93f) return DetectionConfidence.MEDIUM
+
+        // Count how many INDEPENDENT signals agree. A candidate becomes HIGH
+        // only when several unrelated measurements support it at once, so a
+        // table, wall, laptop lid or monitor frame cannot pass on one signal.
+        val strong = listOf(
+            best.edgeSupportScore >= 0.45f,
+            best.polarityScore >= 0.45f,
+            best.parallelScore >= 0.55f,
+            best.contrastScore >= 0.40f,
+            best.contrastScore >= 0.55f || best.textureScore >= 0.30f,
+            best.angleScore >= 0.55f,
+            best.rectangularityScore >= 0.80f,
+            best.aspectScore >= 0.45f,
+            best.continuityScore >= 0.45f,
+            inArea
+        ).count { it }
+
         return when {
-            best.score >= 0.62f && best.edgeSupportScore >= 0.45f && inArea && best.borderScore > 0.3f -> DetectionConfidence.HIGH
-            best.score >= 0.55f && best.edgeSupportScore >= 0.40f && inArea && margin > -0.05f -> DetectionConfidence.HIGH
-            best.score >= 0.38f && best.areaFraction in 0.04f..0.97f -> DetectionConfidence.MEDIUM
+            // Strong geometric + photometric agreement AND margin over the
+            // runner-up: this is a real page.
+            best.score >= 0.58f && strong >= 7 &&
+                best.edgeSupportScore >= 0.45f && best.polarityScore >= 0.45f &&
+                best.parallelScore >= 0.50f && inArea && best.borderScore > 0.3f &&
+                margin > 0.0f -> DetectionConfidence.HIGH
+
+            best.score >= 0.48f && strong >= 5 &&
+                best.edgeSupportScore >= 0.40f && inArea -> DetectionConfidence.MEDIUM
+
+            // Anything weaker is never auto-processed; prefer asking the user
+            // over shipping an uncertain background.
             else -> DetectionConfidence.LOW
         }
     }
@@ -824,6 +1021,83 @@ object DocumentDetector {
         val variance = sumSq / n - mean * mean
         val std = sqrt(max(0.0, variance))
         return mean > 225 && std < 16
+    }
+
+    // ------------------------------------------------------------------
+    // Digital-page identification (CASE A: born-digital PDF page)
+    // ------------------------------------------------------------------
+
+    /**
+     * Positively identifies a born-digital page: a white canvas carrying only
+     * sparse, hard-edged, axis-aligned ink, with no photographic scene.
+     *
+     * This is deliberately strict. A photograph of paper on a white table also
+     * has bright borders, so brightness alone is not enough — the content must
+     * be a low-density grid of text-like marks aligned to the page axes. When
+     * in doubt this returns false and the page requires confirmation.
+     */
+    fun isDigitalPage(gray: FloatArray, w: Int, h: Int): Boolean {
+        if (w < 32 || h < 32) return false
+        // 1. Page background must be genuinely white.
+        if (medianOf(gray) < 232f) return false
+        if (isUniformBorder(gray, w, h).not()) return false
+
+        // 2. Sample the ink: how much of the page is dark, and how sharp is it?
+        var ink = 0
+        var total = 0
+        var rowTransitionH = 0
+        var colTransitionV = 0
+        var prevRowDark = false
+        var prevColDark = false
+        val step = 2
+        var y = 0
+        val colDark = BooleanArray(h)
+        while (y < h) {
+            var rowDark = false
+            var x = 0
+            while (x < w) {
+                val v = gray[y * w + x]
+                if (v < 160f) {
+                    ink++
+                    rowDark = true
+                    colDark[y] = true
+                }
+                total++
+                x += step
+            }
+            if (rowDark != prevRowDark) rowTransitionH++
+            prevRowDark = rowDark
+            y += step
+        }
+        var x2 = 0
+        while (x2 < w) {
+            var colHasInk = false
+            var yy = 0
+            while (yy < h) {
+                if (colDark[yy]) colHasInk = true
+                yy += step
+            }
+            if (colHasInk != prevColDark) colTransitionV++
+            prevColDark = colHasInk
+            x2 += step
+        }
+        if (total == 0 || ink == 0) return false
+
+        // 3. Text is sparse: a page is a few percent ink, not a filled image.
+        val inkRatio = ink.toDouble() / total
+        if (inkRatio > 0.22) return false
+
+        // 4. Horizontal text rows: many alternating ink/blank bands, and
+        //    the ink spans only part of the width (text lines, not a photo).
+        val rows = h / step
+        if (rowTransitionH < 6 || rowTransitionH > rows * 0.75) return false
+
+        // 5. Vertical structure is much weaker than horizontal: paragraphs
+        //    start/stop vertically far less often than they do horizontally.
+        //    A photograph of paper fails this even on a white table.
+        if (colTransitionV > rowTransitionH * 3) return false
+
+        return true
     }
 
     // ------------------------------------------------------------------

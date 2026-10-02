@@ -80,19 +80,19 @@ class HomeViewModel(private val repository: DocumentRepository) : ViewModel() {
                 if (origPath != null) {
                     val bitmap = storageManager.loadBitmap(origPath)
                     if (bitmap != null) {
-                        try {
-                            val result = DocumentProcessor.processImageStrict(bitmap, FilterMode.AUTO, null)
-                            result.documentOnly.recycle()
-                            val procPath = storageManager.saveBitmap(result.a4, isOriginal = false)
-                            if (!result.a4.isRecycled) result.a4.recycle()
+                        // HIGH -> processed A4. MEDIUM / LOW -> original only,
+                        // pending the corner editor. Never auto-save an
+                        // uncertain quad.
+                        val scan = DocumentProcessor.processImageAutoOrNull(bitmap, FilterMode.AUTO)
+                        if (scan != null) {
+                            scan.documentOnly.recycle()
+                            val procPath = storageManager.saveBitmap(scan.a4, isOriginal = false)
+                            if (!scan.a4.isRecycled) scan.a4.recycle()
                             pagePairs.add(Pair(origPath, procPath))
-                        } catch (e: com.camscan.app.domain.processor.NeedsManualCornersException) {
-                            // LOW confidence: keep the original pending manual
-                            // corner correction instead of a fake full-photo scan.
+                        } else {
                             pagePairs.add(Pair(origPath, origPath))
-                        } finally {
-                            if (!bitmap.isRecycled) bitmap.recycle()
                         }
+                        if (!bitmap.isRecycled) bitmap.recycle()
                     }
                 }
             }

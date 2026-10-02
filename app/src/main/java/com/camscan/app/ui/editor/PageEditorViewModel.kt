@@ -6,6 +6,7 @@ import android.graphics.Matrix
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.camscan.app.CamScanApplication
 import com.camscan.app.data.repository.DocumentRepository
 import com.camscan.app.domain.model.FilterMode
 import com.camscan.app.domain.model.PageModel
@@ -42,9 +43,18 @@ class PageEditorViewModel(private val repository: DocumentRepository) : ViewMode
         }
     }
 
+    /**
+     * Normal filter/brightness/contrast/rotation editing operates on the
+     * PROCESSED (rectified) page, never on the raw camera photograph. Pulling
+     * the original back in here would reintroduce the surrounding background
+     * into an already-corrected scan.
+     *
+     * The original is reserved for recrop / reset / re-detection, which happen
+     * in the corner editor. See [PageEditorSource].
+     */
     private fun updatePreview(context: Context, page: PageModel) {
-        val app = context.applicationContext as com.camscan.app.CamScanApplication
-        val bitmap = app.storageManager.loadBitmap(page.originalImagePath)
+        val app = context.applicationContext as CamScanApplication
+        val bitmap = app.storageManager.loadBitmap(PageEditorSource.resolve(page))
         if (bitmap != null) {
             var rotated = bitmap
             if (rotationDegrees.value % 360 != 0) {
@@ -110,7 +120,10 @@ class PageEditorViewModel(private val repository: DocumentRepository) : ViewMode
                 processedImagePath = newProcPath,
                 filterMode = selectedFilter.value,
                 rotationDegrees = rotationDegrees.value,
-                ocrText = ocrTextResult.value ?: page.ocrText
+                ocrText = ocrTextResult.value ?: page.ocrText,
+                // Saving an edited (non-original) page resolves the pending
+                // state, so the page may now be exported.
+                needsManualCorrection = false
             )
 
             repository.updatePage(updatedPage)

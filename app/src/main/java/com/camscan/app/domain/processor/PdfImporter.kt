@@ -92,31 +92,30 @@ object PdfImporter {
 
                     try {
                         val origPath = storageManager.saveBitmap(bitmap, isOriginal = true)
-                        // Per-page detection pipeline. Digital-born pages have
-                        // uniform borders so the detector accepts the page
-                        // itself; photographed pages inside image-PDFs get
-                        // real quad detection. LOW confidence never produces
-                        // a blind full-canvas "scan": fall back to a clean A4
-                        // canvas fit of the render, flagged for manual review
-                        // via the corner editor (original is preserved).
-                        val scanned: Bitmap = try {
-                            DocumentProcessor.processImageStrict(
-                                bitmap, filterMode, null
-                            ).let { result ->
-                                val a4 = result.a4
-                                result.documentOnly.recycle()
-                                a4
-                            }
-                        } catch (e: NeedsManualCornersException) {
-                            // Detection failed for this page. Instead of embedding
-                            // the whole PDF canvas (page numbers, headers, printer
-                            // borders), find the bounding box of the actual content.
-                            // If the content is inset, A4-fit the crop; if it fills
-                            // the page, the render itself IS the document.
-                            DocumentProcessor.formatToA4Canvas(contentCropped(bitmap))
+                        // Two fundamentally different PDF cases:
+                        //
+                        //  CASE A  born-digital page: the PDF page IS the
+                        //          document, but only when detection positively
+                        //          identifies it as a digital page.
+                        //  CASE B  image-based page: a photograph fills the PDF
+                        //          canvas, so detection runs and rectifies the
+                        //          embedded document.
+                        //
+                        // If neither yields a HIGH-confidence scan we store the
+                        // rendered page as pending manual correction. There is
+                        // NO content-bounding-box fallback: a non-white bbox is
+                        // not document detection.
+                        val scan = DocumentProcessor.processImageAutoOrNull(bitmap, filterMode)
+                        val procPath: String
+                        if (scan != null) {
+                            scan.documentOnly.recycle()
+                            procPath = storageManager.saveBitmap(scan.a4, isOriginal = false)
+                            if (!scan.a4.isRecycled) scan.a4.recycle()
+                        } else {
+                            // Pending: the user opens this page in the corner
+                            // editor. procPath == origPath marks it.
+                            procPath = origPath
                         }
-                        val procPath = storageManager.saveBitmap(scanned, isOriginal = false)
-                        if (!scanned.isRecycled) scanned.recycle()
 
                         resultPages.add(Pair(origPath, procPath))
                     } finally {
@@ -137,71 +136,6 @@ object PdfImporter {
         }
 
         resultPages
-    }
-
-    /**
-     * Crops a rendered PDF page to the bounding box of its non-white content.
-     *
-     * A low-confidence page (e.g. a photographed page embedded in a PDF) is
-     * still drawn on the full PDF canvas, which typically carries page
-     * numbers, running headers and printer crop/border marks. Trimming to the
-     * content box removes those without inventing perspective geometry.
-     *
-     * Works on a downsampled copy for speed, then scales the box back to
-     * full resolution. Returns the input bitmap untouched when the content
-     * already fills the canvas (nothing to trim).
-     */
-    private fun contentCropped(bitmap: Bitmap): Bitmap {
-        val w = bitmap.width
-        val h = bitmap.height
-        if (w < 8 || h < 8) return bitmap
-
-        val sampleScale = minOf(1f, 600f / maxOf(w, h))
-        val sw = maxOf(1, (w * sampleScale).toInt())
-        val sh = maxOf(1, (h * sampleScale).toInt())
-        val small = Bitmap.createScaledBitmap(bitmap, sw, sh, true)
-
-        val pixels = IntArray(sw * sh)
-        small.getPixels(pixels, 0, sw, 0, 0, sw, sh)
-        if (small !== bitmap) small.recycle()
-
-        // Threshold against near-white paper; PDF pages are white-backed.
-        var minX = sw
-        var minY = sh
-        var maxX = -1
-        var maxY = -1
-        for (y in 0 until sh) {
-            for (x in 0 until sw) {
-                val c = pixels[y * sw + x]
-                val r = (c shr 16) and 0xFF
-                val g = (c shr 8) and 0xFF
-                val b = c and 0xFF
-                if (r < 235 || g < 235 || b < 235) {
-                    if (x < minX) minX = x
-                    if (x > maxX) maxX = x
-                    if (y < minY) minY = y
-                    if (y > maxY) maxY = y
-                }
-            }
-        }
-        // No content, or content already fills the canvas: nothing to trim.
-        if (maxX < 0) return bitmap
-        val boxW = (maxX - minX + 1).toFloat() / sw
-        val boxH = (maxY - minY + 1).toFloat() / sh
-        if (boxW >= 0.90f && boxH >= 0.90f) return bitmap
-
-        // Back to full resolution, with a small margin.
-        val pad = 2f / maxOf(sw, sh)
-        val left = ((minX.toFloat() / sw) - pad).coerceIn(0f, 1f)
-        val top = ((minY.toFloat() / sh) - pad).coerceIn(0f, 1f)
-        val right = ((maxX + 1).toFloat() / sw + pad).coerceIn(0f, 1f)
-        val bottom = ((maxY + 1).toFloat() / sh + pad).coerceIn(0f, 1f)
-        val cw = ((right - left) * w).toInt().coerceIn(1, w)
-        val ch = ((bottom - top) * h).toInt().coerceIn(1, h)
-        val cx = (left * w).toInt().coerceIn(0, w - cw)
-        val cy = (top * h).toInt().coerceIn(0, h - ch)
-        if (cw >= w && ch >= h) return bitmap
-        return Bitmap.createBitmap(bitmap, cx, cy, cw, ch)
     }
 
     fun getFileName(context: Context, uri: Uri): String? {

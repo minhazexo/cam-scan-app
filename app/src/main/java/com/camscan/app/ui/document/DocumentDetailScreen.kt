@@ -84,7 +84,8 @@ fun DocumentDetailScreen(
     documentId: String,
     onNavigateBack: () -> Unit,
     onNavigateToCamera: (String) -> Unit,
-    onNavigateToPageEditor: (String, String) -> Unit
+    onNavigateToPageEditor: (String, String) -> Unit,
+    onNavigateToCornerAdjust: (String, String) -> Unit
 ) {
     val context = LocalContext.current
     val clipboardManager = LocalClipboardManager.current
@@ -229,7 +230,16 @@ fun DocumentDetailScreen(
                             pageNumber = index + 1,
                             isFirst = index == 0,
                             isLast = index == pages.size - 1,
-                            onClick = { onNavigateToPageEditor(documentId, page.id) },
+                            // A page still awaiting corner correction is a raw render, not
+                    // a scan: send the user straight to the corner editor
+                    // instead of the filter editor.
+                    onClick = {
+                        if (page.needsManualCorrection) {
+                            onNavigateToCornerAdjust(documentId, page.originalImagePath)
+                        } else {
+                            onNavigateToPageEditor(documentId, page.id)
+                        }
+                    },
                             onMoveUp = { viewModel.movePage(index, index - 1) },
                             onMoveDown = { viewModel.movePage(index, index + 1) },
                             onDelete = { viewModel.deletePage(page) }

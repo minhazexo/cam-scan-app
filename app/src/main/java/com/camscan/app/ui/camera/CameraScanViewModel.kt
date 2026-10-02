@@ -13,7 +13,6 @@ import com.camscan.app.domain.model.CornerPoints
 import com.camscan.app.domain.processor.DocumentDetector
 import com.camscan.app.domain.processor.DocumentProcessor
 import com.camscan.app.domain.model.FilterMode
-import com.camscan.app.domain.processor.NeedsManualCornersException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
@@ -77,19 +76,29 @@ class CameraScanViewModel(private val repository: DocumentRepository) : ViewMode
                 val origPath = storageManager.saveBitmap(rotatedBitmap, isOriginal = true)
 
                 if (isBatchMode.value) {
-                    // Inline strict scan per capture; LOW -> pending original.
+                    // Unattended batch: ONLY a HIGH-confidence detection may
+                    // produce a saved scan. MEDIUM and LOW both keep the
+                    // original, pending confirmation / manual corners.
                     var procPath: String? = null
                     var needsManual: Boolean
-                    try {
-                        val result = withContext(Dispatchers.Default) {
-                            DocumentProcessor.processImageStrict(rotatedBitmap, FilterMode.AUTO, null)
+                    val scan = withContext(Dispatchers.Default) {
+                        DocumentProcessor.processImageAutoOrNull(rotatedBitmap, FilterMode.AUTO)
+                    }
+                    if (scan != null) {
+                        scan.documentOnly.recycle()
+                        procPath = storageManager.saveBitmap(scan.a4, isOriginal = false)
+                        if (!scan.a4.isRecycled) scan.a4.recycle()
+                        needsManual = false
+                    } else {
+                        // MEDIUM -> confirm corners, LOW -> manual corners.
+                        // Both stay pending: the user opens the corner editor.
+                        needsManual = try {
+                            withContext(Dispatchers.Default) {
+                                DocumentDetector.detectDocument(rotatedBitmap, fast = false).action.requiresUser
+                            }
+                        } catch (e: Exception) {
+                            true
                         }
-                        result.documentOnly.recycle()
-                        procPath = storageManager.saveBitmap(result.a4, isOriginal = false)
-                        if (!result.a4.isRecycled) result.a4.recycle()
-                        needsManual = result.needsConfirmation
-                    } catch (e: NeedsManualCornersException) {
-                        needsManual = true
                     }
                     val finalProc = procPath ?: origPath // pending: correct via corner editor
                     capturedPages.value = capturedPages.value + Pair(origPath, finalProc)
@@ -186,18 +195,19 @@ class CameraScanViewModel(private val repository: DocumentRepository) : ViewMode
                 if (origPath != null) {
                     val bitmap = storageManager.loadBitmap(origPath)
                     if (bitmap != null) {
-                        try {
-                            val result = DocumentProcessor.processImageStrict(bitmap, FilterMode.AUTO, null)
-                            result.documentOnly.recycle()
-                            val procPath = storageManager.saveBitmap(result.a4, isOriginal = false)
-                            if (!result.a4.isRecycled) result.a4.recycle()
+                        // HIGH -> save the processed A4 page.
+                        // MEDIUM / LOW -> save the original only, pending the
+                        // corner editor. An uncertain quad is never a final scan.
+                        val scan = DocumentProcessor.processImageAutoOrNull(bitmap, FilterMode.AUTO)
+                        if (scan != null) {
+                            scan.documentOnly.recycle()
+                            val procPath = storageManager.saveBitmap(scan.a4, isOriginal = false)
+                            if (!scan.a4.isRecycled) scan.a4.recycle()
                             pagePairs.add(Pair(origPath, procPath))
-                        } catch (e: NeedsManualCornersException) {
-                            // Pending manual correction via the corner editor.
+                        } else {
                             pagePairs.add(Pair(origPath, origPath))
-                        } finally {
-                            if (!bitmap.isRecycled) bitmap.recycle()
                         }
+                        if (!bitmap.isRecycled) bitmap.recycle()
                     }
                 }
             }

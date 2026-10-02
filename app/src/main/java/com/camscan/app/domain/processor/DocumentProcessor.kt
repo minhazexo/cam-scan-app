@@ -8,8 +8,10 @@ import com.camscan.app.domain.model.CornerPoints
 import com.camscan.app.domain.model.DetectionConfidence
 import com.camscan.app.domain.model.DetectionResult
 import com.camscan.app.domain.model.FilterMode
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sqrt
 
 /**
  * Raised when automatic detection cannot produce a trustworthy quad.
@@ -59,14 +61,18 @@ object DocumentProcessor {
      * DOCUMENT-ONLY -> DESKEW -> DEWARP? -> ENHANCE -> A4 -> FINAL CHECK.
      *
      * @param corners caller-supplied quad (manual editor). Null = auto-detect.
-     * @throws NeedsManualCornersException when auto detection is LOW or the
-     * auto result fails validation / background check. Never returns a
-     * full-photo "scan".
+     * @param allowUnconfirmed unattended callers (batch, gallery, PDF) pass
+     *   true to *also* accept a MEDIUM quad. Interactive confirmation flows
+     *   leave it false so an unconfirmed quad is never auto-scanned.
+     * @throws NeedsManualCornersException when auto detection is not
+     *   HIGH (or MEDIUM when [allowUnconfirmed] is false), or the auto result
+     *   fails validation / background check. Never returns a full-photo scan.
      */
     fun processImageStrict(
         bitmap: Bitmap,
         filterMode: FilterMode = FilterMode.AUTO,
-        corners: CornerPoints? = null
+        corners: CornerPoints? = null,
+        allowUnconfirmed: Boolean = false
     ): ScanResult {
         val fromUser = corners != null
         val detection: DetectionResult?
@@ -90,8 +96,21 @@ object DocumentProcessor {
         } else {
             val result = DocumentDetector.detectDocument(bitmap, fast = false)
             detection = result
-            if (result.needsManual || result.corners == null) {
+            if (result.corners == null) {
                 throw NeedsManualCornersException(result)
+            }
+            // An uncertain quad is never a final scan. Unattended callers get
+            // the exception so the page stays pending; interactive callers can
+            // re-run with allowUnconfirmed once the user confirms the corners.
+            if (result.blocksAutoProcessing && !allowUnconfirmed) {
+                throw NeedsManualCornersException(
+                    result,
+                    if (result.needsConfirmation) {
+                        "Detected corners are uncertain. Confirm or adjust them to finish this page."
+                    } else {
+                        result.reason.ifBlank { "Document detection failed; manual corners required." }
+                    }
+                )
             }
             quad = result.corners
         }
@@ -179,17 +198,17 @@ object DocumentProcessor {
     }
 
     /**
-     * Best-effort A4 for batch/background import paths that cannot show the
-     * manual editor inline. Returns null when detection is LOW (caller keeps
-     * the original pending manual review) instead of fabricating a scan from
-     * the full photo. MEDIUM/HIGH quads are used (never full frame).
+     * Strict pipeline for unattended callers (batch / gallery / PDF).
+     * Returns a finished scan ONLY for a HIGH-confidence detection.
+     * MEDIUM and LOW both return null so the caller keeps the original
+     * pending user confirmation / manual corner correction.
      */
     fun processImageAutoOrNull(
         bitmap: Bitmap,
         filterMode: FilterMode = FilterMode.AUTO
     ): ScanResult? {
         return try {
-            processImageStrict(bitmap, filterMode, null)
+            processImageStrict(bitmap, filterMode, null, allowUnconfirmed = false)
         } catch (e: NeedsManualCornersException) {
             null
         }
@@ -307,11 +326,14 @@ object DocumentProcessor {
             val pixels = IntArray(w * h)
             rectified.getPixels(pixels, 0, w, 0, 0, w, h)
 
-            fun stripStats(x0: Int, y0: Int, x1: Int, y1: Int): Triple<Double, Double, Double> {
+            data class Strip(val mean: Double, val std: Double, val sat: Double, val edgeDensity: Double)
+
+            fun stripStats(x0: Int, y0: Int, x1: Int, y1: Int): Strip {
                 var n = 0L
                 var sum = 0.0
                 var sumSq = 0.0
                 var satSum = 0.0
+                var edgeCount = 0L
                 var y = y0
                 while (y < y1) {
                     var x = x0
@@ -324,15 +346,27 @@ object DocumentProcessor {
                         sum += lum
                         sumSq += lum * lum
                         satSum += (maxOf(r, g, b) - minOf(r, g, b)).toDouble()
+                        // Local contrast: horizontal gradient magnitude.
+                        if (x + 2 < x1) {
+                            val c2 = pixels[y * w + x + 2]
+                            val lum2 = 0.299 * ((c2 shr 16) and 0xFF) +
+                                0.587 * ((c2 shr 8) and 0xFF) + 0.114 * (c2 and 0xFF)
+                            if (abs(lum - lum2) > 22) edgeCount++
+                        }
                         n++
                         x += 3
                     }
                     y += 3
                 }
-                if (n == 0L) return Triple(255.0, 0.0, 0.0)
+                if (n == 0L) return Strip(255.0, 0.0, 0.0, 0.0)
                 val mean = sum / n
                 val variance = sumSq / n - mean * mean
-                return Triple(mean, kotlin.math.sqrt(maxOf(0.0, variance)), satSum / n)
+                return Strip(
+                    mean,
+                    sqrt(maxOf(0.0, variance)),
+                    satSum / n,
+                    edgeCount.toDouble() / n
+                )
             }
 
             val edge = (min(w, h) * 0.03f).toInt().coerceAtLeast(4)
@@ -344,25 +378,32 @@ object DocumentProcessor {
             val right = stripStats(w - edge, 0, w, h)
             val center = stripStats(w / 2 - inner / 2, h / 2 - inner / 2, w / 2 + inner / 2, h / 2 + inner / 2)
 
-            // A border strip that is much darker / more colorful / more
-            // textured than the page centre indicates outside scene.
             val borders = listOf(top, bottom, left, right)
             var suspicious = 0
-            for ((mean, std, sat) in borders) {
-                val darker = center.first - mean > 28
-                val textured = std > center.second * 2.2 + 12
-                val colorful = sat > center.third + 22 && sat > 30
-                if ((darker && textured) || (darker && colorful) || (textured && colorful)) {
+            for (s in borders) {
+                // Darkness vs page centre.
+                val darker = center.mean - s.mean > 28
+                // Texture: variance far above the paper centre.
+                val textured = s.std > center.std * 2.2 + 12
+                // Colourfulness: real scene (wood, fabric, screen) is saturated.
+                val colorful = s.sat > center.sat + 22 && s.sat > 30
+                // Edge density: scene detail, unlike blank paper margins.
+                val busy = s.edgeDensity > center.edgeDensity + 0.18
+                if ((darker && textured) || (darker && colorful) ||
+                    (textured && colorful) || (busy && textured)
+                ) {
                     suspicious++
                 }
             }
             // Two or more bad sides -> invalid scan.
             if (suspicious >= 2) return false
             // Any near-black strip is almost certainly background, not paper.
-            if (borders.any { it.first < 45 }) return false
+            if (borders.any { it.mean < 45 }) return false
             return true
         } catch (e: Exception) {
-            return true // never block on analysis errors for user quads
+            // Fail CLOSED. If we cannot prove the output is clean, we must not
+            // save it as a final scan.
+            return false
         }
     }
 

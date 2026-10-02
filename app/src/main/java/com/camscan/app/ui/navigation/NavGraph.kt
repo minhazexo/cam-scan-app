@@ -158,6 +158,9 @@ fun NavGraph(
                 },
                 onNavigateToPageEditor = { dId, pageId ->
                     navController.navigate(Screen.PageEditor.createRoute(dId, pageId))
+                },
+                onNavigateToCornerAdjust = { dId, imgPath ->
+                    navController.navigate(Screen.CornerAdjust.createRoute(dId, imgPath))
                 }
             )
         }

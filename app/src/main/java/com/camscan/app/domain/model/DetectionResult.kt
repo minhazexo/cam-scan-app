@@ -1,5 +1,7 @@
 package com.camscan.app.domain.model
 
+import android.graphics.PointF
+
 /**
  * Confidence level for automatic document detection.
  *
@@ -17,22 +19,66 @@ enum class DetectionConfidence {
 }
 
 /**
+ * The workflow action a detection result authorises.
+ *
+ * This is the *semantic* control surface. Callers that run unattended
+ * (batch capture, gallery import, PDF import) must branch on this, not on
+ * [DetectionConfidence], so that a merely-uncertain quad can never be
+ * auto-processed by accident.
+ */
+enum class DetectionAction {
+    /** Confident detection: the caller may run the strict pipeline unattended. */
+    AUTO_PROCESS,
+
+    /** A quad was found but is uncertain: the user must confirm/adjust it. */
+    USER_CONFIRM,
+
+    /** No trustworthy quad: the user must pick all four corners. */
+    USER_SELECT_CORNERS;
+
+    val requiresUser: Boolean get() = this != AUTO_PROCESS
+}
+
+/**
  * Result of [com.camscan.app.domain.processor.DocumentDetector.detectDocument].
  *
  * @param corners normalized (0..1) quad, ordered TL/TR/BR/BL.
  * @param score 0..1 ranking score of the selected quad.
  * @param allCandidates every ranked candidate (best first), for debug UI.
  * @param reason human-readable explanation, especially for LOW.
+ * @param digitalPage true when the input was *positively identified* as a
+ *   genuine born-digital page (clean vector/text PDF page). Only then may the
+ *   full page canvas legitimately act as the document quad.
  */
 data class DetectionResult(
     val corners: CornerPoints?,
     val confidence: DetectionConfidence,
     val score: Float,
     val allCandidates: List<ScoredQuad> = emptyList(),
-    val reason: String = ""
+    val reason: String = "",
+    val digitalPage: Boolean = false
 ) {
-    val needsManual: Boolean get() = confidence == DetectionConfidence.LOW || corners == null
-    val needsConfirmation: Boolean get() = confidence == DetectionConfidence.MEDIUM
+    /** Workflow action for this result. */
+    val action: DetectionAction
+        get() = when {
+            corners == null -> DetectionAction.USER_SELECT_CORNERS
+            digitalPage -> DetectionAction.AUTO_PROCESS
+            confidence == DetectionConfidence.HIGH -> DetectionAction.AUTO_PROCESS
+            confidence == DetectionConfidence.MEDIUM -> DetectionAction.USER_CONFIRM
+            else -> DetectionAction.USER_SELECT_CORNERS
+        }
+
+    /** True only for LOW: the user must place all four corners by hand. */
+    val needsManual: Boolean get() = action == DetectionAction.USER_SELECT_CORNERS
+
+    /** True for MEDIUM: a quad exists but the user must confirm it. */
+    val needsConfirmation: Boolean get() = action == DetectionAction.USER_CONFIRM
+
+    /**
+     * True when an unattended caller must NOT save a final scan. Correctness
+     * beats always producing an image: these pages stay pending.
+     */
+    val blocksAutoProcessing: Boolean get() = action.requiresUser
 }
 
 /**
@@ -40,10 +86,10 @@ data class DetectionResult(
  * Points are in the detection-sample pixel space unless stated otherwise.
  */
 data class ScoredQuad(
-    val topLeft: android.graphics.PointF,
-    val topRight: android.graphics.PointF,
-    val bottomRight: android.graphics.PointF,
-    val bottomLeft: android.graphics.PointF,
+    val topLeft: PointF,
+    val topRight: PointF,
+    val bottomRight: PointF,
+    val bottomLeft: PointF,
     val score: Float,
     val areaScore: Float = 0f,
     val rectangularityScore: Float = 0f,
@@ -52,14 +98,18 @@ data class ScoredQuad(
     val aspectScore: Float = 0f,
     val borderScore: Float = 0f,
     val polarityScore: Float = 0f,
+    val parallelScore: Float = 0f,
+    val contrastScore: Float = 0f,
+    val textureScore: Float = 0f,
+    val continuityScore: Float = 0f,
     val areaFraction: Float = 0f
 ) {
     fun toCornerPoints(sampleW: Float, sampleH: Float): CornerPoints {
         return CornerPoints(
-            android.graphics.PointF(topLeft.x / sampleW, topLeft.y / sampleH),
-            android.graphics.PointF(topRight.x / sampleW, topRight.y / sampleH),
-            android.graphics.PointF(bottomRight.x / sampleW, bottomRight.y / sampleH),
-            android.graphics.PointF(bottomLeft.x / sampleW, bottomLeft.y / sampleH)
+            PointF(topLeft.x / sampleW, topLeft.y / sampleH),
+            PointF(topRight.x / sampleW, topRight.y / sampleH),
+            PointF(bottomRight.x / sampleW, bottomRight.y / sampleH),
+            PointF(bottomLeft.x / sampleW, bottomLeft.y / sampleH)
         )
     }
 }
